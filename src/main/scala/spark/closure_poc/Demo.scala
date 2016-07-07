@@ -21,10 +21,16 @@ object Demo {
   }
 
   val closure2 = (b: T) => {
-    var array = new Array[Int](3)
-    array(1) = 3
-    array(1)
+    var array = new Array[Boolean](3)  // temoporary data
+    val index = 1 + 2
+    array(index) = true
+    if (array(1) == true) {
+      array(1)
+    } else {
+      1
+    }
   }
+
   def main(args: Array[String]): Unit = {
     val reader = new ClassReader(closure2.getClass.getName)
     val writer = new PrintWriter(System.out)

@@ -365,7 +365,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 } else {
                   stack.pop()
                 }
-                if (obj == Argument) {
+                if (obj == Argument && arguments.length == 0) {
                   stack.push(Field(methodName, obj))
                 } else {
                   stack.push(FunctionCall(className, methodName, obj, arguments))

@@ -31,10 +31,24 @@ object Demo {
     }
   }
 
+
+  val closure3 = (b: Long) => {
+    b + 1
+  }
+
+
+  case class ABC(a: Int, b: Int)
+
+  val closure4 = (e: ABC) => {
+    val b = e.b
+    val sqrt = Math.sqrt(e.a)
+    sqrt + b
+  }
+
   def main(args: Array[String]): Unit = {
-    val reader = new ClassReader(closure2.getClass.getName)
+    val reader = new ClassReader(closure4.getClass.getName)
     val writer = new PrintWriter(System.out)
-    reader.accept(new ByteCodeParser[T](writer), 0)
+    reader.accept(new ByteCodeParser[ABC](writer), 0)
 
 //    reader.accept(new TraceClassVisitor(writer), 0)
   }

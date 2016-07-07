@@ -14,9 +14,6 @@ import scala.collection.mutable
 object ByteCodeParser {
 
   val UnsupportedOpcodes = Set(
-    // MethodInsnNode
-    Opcodes.INVOKESPECIAL, Opcodes.INVOKEINTERFACE,
-
     // InvokeDynamicInsnNode
     Opcodes.INVOKEDYNAMIC,
 
@@ -36,10 +33,10 @@ object ByteCodeParser {
     Opcodes.RET,
 
     // InsnNode
-    Opcodes.POP, Opcodes.POP2, Opcodes.DUP, Opcodes.DUP_X1, Opcodes.DUP_X2, Opcodes.DUP2,
+    Opcodes.POP2, Opcodes.DUP, Opcodes.DUP_X1, Opcodes.DUP_X2, Opcodes.DUP2,
     Opcodes.DUP2_X1, Opcodes.DUP2_X2, Opcodes.SWAP,
     Opcodes.ISHL, Opcodes.LSHL, Opcodes.ISHR, Opcodes.LSHR,Opcodes.IUSHR, Opcodes.LUSHR,
-    Opcodes.ARRAYLENGTH, Opcodes.ATHROW,
+    Opcodes.ATHROW,
     Opcodes.MONITORENTER, Opcodes.MONITOREXIT,
 
     // TableSwitchInsnNode
@@ -49,35 +46,92 @@ object ByteCodeParser {
     Opcodes.LOOKUPSWITCH
   )
 
+  class ByteCodeParserExecption(message: String) extends Exception(message)
+
   class UnsupportedOpCodeException(
       opCode: Int,
       message: String = "")
-    extends Exception(s"Unsupported OpCode ${Printer.OPCODES(opCode)}, $message")
+    extends ByteCodeParserExecption(s"Unsupported OpCode ${Printer.OPCODES(opCode)}, $message")
 
   trait Node {
     def children: List[Node]
   }
 
-  trait BinaryNode extends Node {
+  trait NodeWithName extends Node {
+    def nodeName: String = getClass.getSimpleName
+  }
+
+
+  trait BinaryNode extends NodeWithName {
     def left: Node
     def right: Node
     override def children: List[Node] = List(left, right)
   }
 
-  trait UnaryNode extends Node {
+  trait UnaryNode extends NodeWithName {
     def node: Node
     override def children: List[Node] = List(node)
   }
 
-  trait NullaryNode extends Node {
+  trait NullaryNode extends NodeWithName {
     override def children: List[Node] = List.empty[Node]
   }
 
   case class Constant(value: Any) extends NullaryNode
 
-  case class Argument(name: String) extends NullaryNode
+  case object Argument extends NullaryNode
 
-  case class Field(fieldName: String, node: Node) extends UnaryNode
+  case object This extends NullaryNode
+
+  case class Field(fieldName: String, node: Node) extends NullaryNode
+
+  val x = Cast[Long](null)
+
+  // if (condition == true) left else right
+  case class If(condition: Node, left: Node, right: Node) extends BinaryNode
+
+  case class FunctionCall(className: String, method: String, obj: Node, arguments: List[Node]) extends NodeWithName {
+    def children: List[Node] = arguments
+  }
+
+  case class Cast[T: ClassTag](node: Node) extends UnaryNode {
+    implicit val tag = classTag[T]
+    override def nodeName: String = {
+      s"Cast[${tag.toString()}]"
+    }
+  }
+
+  def treeString(node: Node): String = {
+    val builder = new StringBuilder
+
+    def simpleString: PartialFunction[Node, String] = {
+      case product: NodeWithName with Product  =>
+        val children = product.children.toSet[Any]
+        val args = product.productIterator.filterNot {
+          case l: Iterable[_] => l.toSet.subsetOf(children)
+          case e => children.contains(e)
+        }
+        s"${product.nodeName} ${args.mkString(", ")}"
+    }
+
+    def buildTreeString(node: Node, depth: Int): Unit = {
+      (0 until depth).foreach(_ => builder.append("  "))
+      builder.append(simpleString(node))
+      builder.append("\n")
+      node.children.foreach(buildTreeString(_, depth + 1))
+    }
+    buildTreeString(node, 0)
+    builder.toString()
+  }
+
+  case class ArrayNode[T](
+    length: Node,
+    data: mutable.Map[Long, Node] = mutable.Map.empty[Long, Node])
+    (implicit val tag: ClassTag[T]) extends NodeWithName {
+    override def children: List[Node] = data.values.toList
+    def get(index: Long): Node = data.getOrElse(index, Constant(0L))
+    def put(index: Long, value: Node): Unit = { data(index) = value }
+  }
 
   /**
    * @param operator +, -, *, /, <, >, ==, <=, >=,
@@ -114,6 +168,38 @@ object ByteCodeParser {
         case (Constant(a: Long), Constant(b: Long)) => Constant(a / b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a / b)
         case _ => Arithmetic("/", left, right)
+      }
+    }
+
+    def rem(left: Node, right: Node): Node = {
+      (left, right) match {
+        case (Constant(a: Long), Constant(b: Long)) => Constant(a % b)
+        case (Constant(a: Double), Constant(b: Double)) => Constant(a % b)
+        case _ => Arithmetic("%", left, right)
+      }
+    }
+
+    def and(left: Node, right: Node): Node = {
+      (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a & b)
+        case (Constant(a: Long), Constant(b: Long)) => Constant(a & b)
+        case _ => Arithmetic("&", left, right)
+      }
+    }
+
+    def or(left: Node, right: Node): Node = {
+      (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a | b)
+        case (Constant(a: Long), Constant(b: Long)) => Constant(a | b)
+        case _ => Arithmetic("|", left, right)
+      }
+    }
+
+    def xor(left: Node, right: Node): Node = {
+      (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a ^ b)
+        case (Constant(a: Long), Constant(b: Long)) => Constant(a ^ b)
+        case _ => Arithmetic("^", left, right)
       }
     }
 
@@ -165,40 +251,6 @@ object ByteCodeParser {
       }
     }
   }
-
-  case class Cast[T: ClassTag](node: Node) extends UnaryNode
-
-  // if (condition == true) left else right
-  case class If(condition: Node, left: Node, right: Node) extends BinaryNode
-
-  def treeString(node: Node): String = {
-    val builder = new StringBuilder
-
-    def simpleString: PartialFunction[Node, String] = {
-      case product: Product =>
-        val children: Set[Any] = product.children.toSet
-        val args = product.productIterator.filterNot(children.contains(_))
-        s"${product.getClass.getSimpleName} ${args.mkString(", ")}"
-    }
-
-    def buildTreeString(node: Node, depth: Int): Unit = {
-      (0 until depth).foreach(_ => builder.append("  "))
-      builder.append(simpleString(node))
-      builder.append("\n")
-      node.children.foreach(buildTreeString(_, depth + 1))
-    }
-    buildTreeString(node, 0)
-    builder.toString()
-  }
-
-  case class ArrayNode[T](
-      length: Node,
-      data: mutable.Map[Long, Node] = mutable.Map.empty[Long, Node])
-      (implicit val tag: ClassTag[T]) extends Node {
-    override def children: List[Node] = data.values.toList
-    def get(index: Long): Node = data.getOrElse(index, Constant(0L))
-    def put(index: Long, value: Node): Unit = { data(index) = value }
-  }
 }
 
 class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter)
@@ -239,6 +291,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
   }
 
   override def visitMethod(access: Int, name: String, desc: String, signature: String, exceptions: Array[String]): MethodVisitor = {
+    Console.println("ACESS method " + name)
     if (isApplyMethod(name, desc)) {
       val method = new MethodNode(access, name, desc, signature, exceptions)
       applyMethods = method :: applyMethods
@@ -251,6 +304,9 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
   override def visitEnd: Unit = {
     Console.println(s"FINISH ANALYZE CLOSURE " + name)
     val myMethodTracer = new MyMethodTracer(null, p)
+    if (applyMethods.length == 0) {
+      throw new ByteCodeParserExecption("We cannot find a apply emthod")
+    }
     val applyMethod = applyMethods.head
     applyMethod.accept(myMethodTracer)
 
@@ -269,12 +325,13 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
   }
 
   private def analyze(applyMethod: MethodNode): Node = {
-    // TODO: Add validation check to ensure this method can be converted to expressions.
-    assert(applyMethod.tryCatchBlocks.size() == 0)
+    if(applyMethod.tryCatchBlocks.size() != 0) {
+      throw new ByteCodeParserExecption("try...catch... is not allowed in ByteCodeParser")
+    }
 
-    var localVars: Map[Int, Node] = applyMethod
-      .localVariables.asInstanceOf[java.util.List[LocalVariableNode]]
-      .asScala.map(node => (node.index, Argument(node.name))).toMap
+    var localVars: Map[Int, Node] = Map.empty[Int, Node]
+    localVars += 0 -> This
+    localVars += 1 -> Argument
 
     val instructions = applyMethod.instructions
 
@@ -294,12 +351,24 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
 
         node match {
           case method: MethodInsnNode =>
-            method.getOpcode match {
-              case Opcodes.INVOKEVIRTUAL =>
-                Console.println("INVOKEVIRTUAL")
-              case Opcodes.INVOKESTATIC =>
-                if (method.owner == Type.getInternalName(classOf[Math])) {
-                  Console.println("INVOKE STATIC MATH")
+            opcode match {
+              case Opcodes.INVOKEVIRTUAL | Opcodes.INVOKESTATIC | Opcodes.INVOKESPECIAL |
+                Opcodes.H_INVOKEINTERFACE =>
+                val className = Type.getObjectType(method.owner).getClassName
+                val methodName = method.name
+                val argumentTypes = Type.getArgumentTypes(method.desc)
+                val arguments = (0 until argumentTypes.length).toList.map {_ =>
+                  stack.pop()
+                }.reverse
+                val obj = if (opcode == Opcodes.INVOKESTATIC) {
+                  Constant(null)
+                } else {
+                  stack.pop()
+                }
+                if (obj == Argument) {
+                  stack.push(Field(methodName, obj))
+                } else {
+                  stack.push(FunctionCall(className, methodName, obj, arguments))
                 }
             }
           case field: FieldInsnNode =>
@@ -436,15 +505,24 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 val left = stack.pop()
                 stack.push(Arithmetic.div(left, right))
               case Opcodes.IREM | Opcodes.LREM | Opcodes.FREM | Opcodes.DREM =>
-                // TODO: support this
-                throw new UnsupportedOpCodeException(opcode)
+                val right = stack.pop()
+                val left = stack.pop()
+                stack.push(Arithmetic.rem(left, right))
               case Opcodes.INEG | Opcodes.LNEG | Opcodes.FNEG | Opcodes.DNEG =>
-                // TODO: support this
-                throw new UnsupportedOpCodeException(opcode)
-              case Opcodes.IAND | Opcodes.LAND | Opcodes.IOR | Opcodes.LOR |
-                   Opcodes.IXOR | Opcodes.LXOR =>
-                // TODO: support this
-                throw new UnsupportedOpCodeException(opcode)
+                val top = stack.pop()
+                stack.push(Arithmetic.minus(Constant(0L), top))
+              case Opcodes.IAND | Opcodes.LAND =>
+                val right = stack.pop()
+                val left = stack.pop()
+                stack.push(Arithmetic.and(left, right))
+              case Opcodes.IOR | Opcodes.LOR =>
+                val right = stack.pop()
+                val left = stack.pop()
+                stack.push(Arithmetic.or(left, right))
+              case Opcodes.IXOR | Opcodes.LXOR =>
+                val right = stack.pop()
+                val left = stack.pop()
+                stack.push(Arithmetic.xor(left, right))
               case Opcodes.I2L | Opcodes.F2L | Opcodes.D2L =>
                 stack.push(Cast[Long](stack.pop))
               case Opcodes.L2I | Opcodes.F2I | Opcodes.D2I =>
@@ -469,6 +547,16 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                     throw new UnsupportedOpCodeException(
                       opcode, s"${Printer.OPCODES(opcode)} need be followed by a jump instruction like " +
                         s"IFEQ, IFNE, IFLT, IFGT, IFLE, IFGE")
+                }
+              case Opcodes.POP | Opcodes.POP2 =>
+                // TODO: Long and Double element take two stack slots. We need to make sure POP2
+                // only pop ONE element.
+                stack.pop()
+
+              case Opcodes.ARRAYLENGTH =>
+                val array = stack.pop()
+                array match  {
+                  case ArrayNode(length, _) => stack.push(length)
                 }
               case Opcodes.IALOAD | Opcodes.LALOAD | Opcodes.FALOAD | Opcodes.DALOAD |
                    Opcodes.AALOAD | Opcodes.BALOAD | Opcodes.CALOAD | Opcodes.SALOAD =>
@@ -498,7 +586,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                    Opcodes.ARETURN =>
                 result = Some(stack.pop())
               case Opcodes.RETURN =>
-                throw new Exception("RETURN is NOT supported, MUST return something...")
+                throw new UnsupportedOpCodeException(opcode)
             }
           case label: LabelNode => // Skip pesudo code
           case lineNumber: LineNumberNode => // Skip pesudo code
@@ -508,7 +596,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
       }
 
       if (result.isEmpty) {
-        throw new Exception("Possibly not having return instructions")
+        throw new ByteCodeParserExecption("Possibly not having return instructions")
       }
       result.get
     }

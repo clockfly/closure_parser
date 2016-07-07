@@ -11,6 +11,10 @@ import org.objectweb.asm.tree.{FieldInsnNode, FrameNode, IincInsnNode, InsnList,
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
+// TODO: Proof there is NO risk in using stack... (Double, and Long use 2 stack slots instad of 1)
+// TODO: Add loop handling
+// TODO: Besides Scala, prove this also works for Java
+// TODO: Optimize the error message.
 object ByteCodeParser {
 
   val UnsupportedOpcodes = Set(
@@ -131,6 +135,10 @@ object ByteCodeParser {
     override def children: List[Node] = data.values.toList
     def get(index: Long): Node = data.getOrElse(index, Constant(0L))
     def put(index: Long, value: Node): Unit = { data(index) = value }
+
+    override def nodeName: String = {
+      s"Array[${tag.toString()}]"
+    }
   }
 
   /**
@@ -302,7 +310,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
   }
 
   override def visitEnd: Unit = {
-    Console.println(s"FINISH ANALYZE CLOSURE " + name)
+
     val myMethodTracer = new MyMethodTracer(null, p)
     if (applyMethods.length == 0) {
       throw new ByteCodeParserExecption("We cannot find a apply emthod")
@@ -317,6 +325,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
     }
 
     analyze(applyMethod)
+    Console.println(s"FINISH ANALYZE CLOSURE " + name)
     super.visitEnd
   }
 
@@ -410,7 +419,6 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
             val localVar = localVars(iinc.`var`)
             localVars += iinc.`var` -> Arithmetic.plus(localVar, Constant(iinc.incr))
           case jump: JumpInsnNode =>
-
             // compareOperator: <, >, ==, <=, >=
             def compareAndJump(comparator: (Node, Node)=> Node): Node = {
               val right = stack.pop()
@@ -495,7 +503,6 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 val right = stack.pop()
                 val left = stack.pop()
                 stack.push(Arithmetic.minus(left, right))
-
               case Opcodes.IMUL | Opcodes.LMUL | Opcodes.FMUL | Opcodes.DMUL =>
                 val right = stack.pop()
                 val left = stack.pop()
@@ -534,7 +541,6 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
               case Opcodes.I2B => stack.push(Cast[Byte](stack.pop))
               case Opcodes.I2C => stack.push(Cast[String](stack.pop))
               case Opcodes.I2S => stack.push(Cast[Short](stack.pop))
-
               case Opcodes.LCMP | Opcodes.FCMPL | Opcodes.FCMPG | Opcodes.DCMPL | Opcodes.DCMPG =>
                 val nextInstruction = instructions.get(index + 1)
                 nextInstruction.getOpcode match {
@@ -568,20 +574,17 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                   case _ =>
                     throw new UnsupportedOpCodeException(opcode)
                 }
-
               case Opcodes.IASTORE | Opcodes.LASTORE | Opcodes.FASTORE | Opcodes.DASTORE |
                    Opcodes.AASTORE | Opcodes.BASTORE | Opcodes.CASTORE | Opcodes.SASTORE =>
                 val data = stack.pop()
                 val index = stack.pop()
                 val array = stack.pop()
-
                 (index, array) match {
                   case (Constant(index: Long), arrayNode@ ArrayNode(_, _)) =>
                     arrayNode.put(index, data)
                   case _ =>
                     throw new UnsupportedOpCodeException(opcode)
                 }
-
               case Opcodes.DRETURN | Opcodes.FRETURN | Opcodes.IRETURN | Opcodes.LRETURN |
                    Opcodes.ARETURN =>
                 result = Some(stack.pop())

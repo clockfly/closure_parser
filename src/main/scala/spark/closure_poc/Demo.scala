@@ -37,7 +37,7 @@ object Demo {
   }
 
 
-  case class ABC(a: Int, b: Int)
+  case class ABC(a: Int, b: Long)
 
   val closure4 = (e: ABC) => {
     val b = e.b
@@ -45,11 +45,32 @@ object Demo {
     sqrt + b
   }
 
-  def main(args: Array[String]): Unit = {
-    val reader = new ClassReader(closure4.getClass.getName)
-    val writer = new PrintWriter(System.out)
-    reader.accept(new ByteCodeParser[ABC](writer), 0)
+  val closure5 = (e: ABC) => {
+    var i = 0
+    while(i < 1) {
+      val b = e.b
+      i += 1
+    }
+    val b = e.b
+    val sqrt = Math.sqrt(e.a)
+    sqrt + b
+  }
 
-//    reader.accept(new TraceClassVisitor(writer), 0)
+  val closure6 = (e: ABC) => {
+    (e.a + 3).asInstanceOf[Int]
+    e.a == 3
+  }
+
+  val closure7 = (e: ABC) => {
+   if (e.b > 3L) {
+     3
+   } else {
+     6
+   }
+  }
+
+  def main(args: Array[String]): Unit = {
+    val parser = new ByteCodeParser
+    parser.parse[ABC](closure7.getClass)
   }
 }

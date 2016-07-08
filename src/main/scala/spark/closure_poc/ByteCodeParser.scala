@@ -3,8 +3,8 @@ import java.io.PrintWriter
 
 import scala.reflect.ClassTag
 
-import org.objectweb.asm.{ClassVisitor, MethodVisitor, Opcodes, Type}
-import org.objectweb.asm.util.{Printer, Textifier}
+import org.objectweb.asm.{ClassReader, ClassVisitor, MethodVisitor, Opcodes, Type}
+import org.objectweb.asm.util.{Printer, Textifier, TraceMethodVisitor}
 import scala.reflect._
 
 import org.objectweb.asm.tree.{FieldInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, LocalVariableNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
@@ -12,9 +12,10 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 // TODO: Proof there is NO risk in using stack... (Double, and Long use 2 stack slots instad of 1)
-// TODO: Add loop handling
+// https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-2.html#jvms-2.11.1
 // TODO: Besides Scala, prove this also works for Java
-// TODO: Optimize the error message.
+// TODO: Optimize the Arimetic operations to make it simper...
+// TODO: Do a cast for the final type...
 object ByteCodeParser {
 
   val UnsupportedOpcodes = Set(
@@ -52,49 +53,57 @@ object ByteCodeParser {
 
   class ByteCodeParserExecption(message: String) extends Exception(message)
 
-  class UnsupportedOpCodeException(
-      opCode: Int,
+  class UnsupportedOpcodeException(
+      opcode: Int,
       message: String = "")
-    extends ByteCodeParserExecption(s"Unsupported OpCode ${Printer.OPCODES(opCode)}, $message")
+    extends ByteCodeParserExecption(s"Unsupported opcode ${Printer.OPCODES(opcode)}, $message")
 
-  trait Node {
-    def children: List[Node]
-  }
-
-  trait NodeWithName extends Node {
+  sealed trait Node {
     def nodeName: String = getClass.getSimpleName
+    def children: List[Node]
+    def dataType: Type
   }
 
-
-  trait BinaryNode extends NodeWithName {
+  trait BinaryNode extends Node {
     def left: Node
     def right: Node
     override def children: List[Node] = List(left, right)
   }
 
-  trait UnaryNode extends NodeWithName {
+  trait UnaryNode extends Node {
     def node: Node
     override def children: List[Node] = List(node)
   }
 
-  trait NullaryNode extends NodeWithName {
+  trait NullaryNode extends Node {
     override def children: List[Node] = List.empty[Node]
   }
 
-  case class Constant(value: Any) extends NullaryNode
+  case class Constant[T: ClassTag](value: T) extends NullaryNode {
+    def dataType: Type = Type.getType(classTag[T].runtimeClass)
+    override def equals(other: Any): Boolean = {
+      other match {
+        case Constant(v2) => value == v2
+        case _ => false
+      }
+    }
+    Console.println("DATATYPE: " + dataType)
+  }
 
-  case object Argument extends NullaryNode
+  case class Argument(dataType: Type) extends NullaryNode
 
-  case object This extends NullaryNode
+  case class This(dataType: Type) extends NullaryNode
 
-  case class Field(fieldName: String, node: Node) extends NullaryNode
+  case class Field(fieldName: String, node: Node, dataType: Type) extends NullaryNode
 
   val x = Cast[Long](null)
 
   // if (condition == true) left else right
-  case class If(condition: Node, left: Node, right: Node) extends BinaryNode
+  case class If(condition: Node, left: Node, right: Node) extends BinaryNode {
+    def dataType: Type = left.dataType
+  }
 
-  case class FunctionCall(className: String, method: String, obj: Node, arguments: List[Node]) extends NodeWithName {
+  case class FunctionCall(className: String, method: String, obj: Node, arguments: List[Node], dataType: Type) extends Node {
     def children: List[Node] = arguments
   }
 
@@ -103,13 +112,14 @@ object ByteCodeParser {
     override def nodeName: String = {
       s"Cast[${tag.toString()}]"
     }
+    override def dataType: Type = Type.getType(tag.runtimeClass)
   }
 
   def treeString(node: Node): String = {
     val builder = new StringBuilder
 
     def simpleString: PartialFunction[Node, String] = {
-      case product: NodeWithName with Product  =>
+      case product: Node with Product  =>
         val children = product.children.toSet[Any]
         val args = product.productIterator.filterNot {
           case l: Iterable[_] => l.toSet.subsetOf(children)
@@ -128,26 +138,46 @@ object ByteCodeParser {
     builder.toString()
   }
 
-  case class ArrayNode[T](
+  case class ArrayNode[T: ClassTag](
     length: Node,
-    data: mutable.Map[Long, Node] = mutable.Map.empty[Long, Node])
-    (implicit val tag: ClassTag[T]) extends NodeWithName {
+    data: mutable.Map[Int, Node] = mutable.Map.empty[Int, Node]) extends Node {
+
+    if (length.dataType != Type.INT_TYPE) {
+      throw new ByteCodeParserExecption("ArrayNode must have a size of Int type")
+    }
+
+    def elementDataType: Type = Type.getType(classTag[T].runtimeClass)
+    override def dataType: Type = Type.getType(s"[${elementDataType.getDescriptor}")
+
     override def children: List[Node] = data.values.toList
-    def get(index: Long): Node = data.getOrElse(index, Constant(0L))
-    def put(index: Long, value: Node): Unit = { data(index) = value }
+    def get(index: Int): Node = data.getOrElse(index, Constant(0L))
+    def put(index: Int, value: Node): Unit = {
+      if (value.dataType != elementDataType) {
+        throw new ByteCodeParserExecption("element type's type mismatch ArrayNode's type argument")
+      }
+      data(index) = value
+    }
 
     override def nodeName: String = {
-      s"Array[${tag.toString()}]"
+      s"Array[${classTag[T].runtimeClass.getName}]"
     }
   }
 
   /**
    * @param operator +, -, *, /, <, >, ==, <=, >=,
    */
-  case class Arithmetic(operator: String, left: Node, right: Node) extends BinaryNode
+  case class Arithmetic(operator: String, left: Node, right: Node) extends BinaryNode {
+    def dataType: Type = left.dataType
+  }
 
   object Arithmetic {
     def plus(left: Node, right: Node): Node = {
+      // 1. check the type of left and right to make sure they match
+      // 2. if there are Constant
+      // 3. pick the left value and right value
+      // do the math   ()
+      // return value..
+
       (left, right) match {
         case (Constant(a: Long), Constant(b: Long)) => Constant(a + b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a + b)
@@ -261,86 +291,72 @@ object ByteCodeParser {
   }
 }
 
-class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter)
-  extends ClassVisitor(Opcodes.ASM5, _cv) {
-
+class ByteCodeParser {
   import spark.closure_poc.ByteCodeParser._
+  private def trace: Boolean = true
 
-  val tag = classTag[T]
+  def parse[T: ClassTag](closure: Class[_]): Unit = {
+    var applyMethods = List.empty[MethodNode]
 
-  def this(cv: ClassVisitor, pw: PrintWriter) {
-    this(cv, new Textifier, pw)
-  }
+    val reader = new ClassReader(closure.getName)
 
-  def this(pw: PrintWriter) {
-    this(null, pw)
-  }
+    reader.accept(new ClassVisitor(Opcodes.ASM5, null) {
+      override def visitMethod(access: Int, name: String, desc: String, signature: String, exceptions: Array[String]): MethodVisitor = {
+        if (isApplyMethod[T](name, desc)) {
+          val method = new MethodNode(access, name, desc, signature, exceptions)
+          applyMethods = method :: applyMethods
+          method
+        } else {
+          null
+        }
+      }
 
-  private var applyMethods = List.empty[MethodNode]
-  private var name: String = null
+      // Check 1. name matches apply 2. single argument 3. argument type matches
+      private def isApplyMethod[T: ClassTag](name: String, signature: String): Boolean = {
+        val expectedArgumentClass = classTag[T].runtimeClass
+        val argumentTypes = Type.getArgumentTypes(signature)
+        val returnType = Type.getReturnType(signature)
+        val namePattern = "apply(\\$mc.*\\$sp)?"
+        if (argumentTypes.length == 1 &&
+          argumentTypes(0).getClassName == expectedArgumentClass.getName &&
+          name.matches(namePattern)) {
+          Console.println("NAME MATCH " + name + ", " + namePattern)
+          true
+        } else {
+          false
+        }
+      }
+    }, 0)
 
-  override def visit(version: Int, access: Int, name: String, signature: String, superName: String, interfaces: Array[String]) {
-    this.name = name
-    Console.println(s"BEGIN ANALYZE CLOSURE $version, $access, $name, $signature, $superName, ${interfaces.mkString(", ")}" )
-  }
-
-  private def isApplyMethod(name: String, signature: String): Boolean = {
-    val argumentTypes = Type.getArgumentTypes(signature)
-    val returnType = Type.getReturnType(signature)
-    val namePattern = "apply(\\$mc.*\\$sp)?"
-    if (argumentTypes.length == 1 &&
-      argumentTypes(0).getClassName == tag.runtimeClass.getName &&
-      name.matches(namePattern)) {
-      Console.println("NAME MATCH " + name + ", " + namePattern)
-      true
-    } else {
-      false
-    }
-  }
-
-  override def visitMethod(access: Int, name: String, desc: String, signature: String, exceptions: Array[String]): MethodVisitor = {
-    Console.println("ACESS method " + name)
-    if (isApplyMethod(name, desc)) {
-      val method = new MethodNode(access, name, desc, signature, exceptions)
-      applyMethods = method :: applyMethods
-      method
-    } else {
-      null
-    }
-  }
-
-  override def visitEnd: Unit = {
-
-    val myMethodTracer = new MyMethodTracer(null, p)
     if (applyMethods.length == 0) {
       throw new ByteCodeParserExecption("We cannot find a apply emthod")
     }
+
+    // Pick the first one if there are multiple apply method found
     val applyMethod = applyMethods.head
-    applyMethod.accept(myMethodTracer)
 
-    p.visitClassEnd
-    if (pw != null) {
-      p.print(pw)
-      pw.flush
+    if (trace) {
+      print(applyMethod)
     }
-
-    analyze(applyMethod)
-    Console.println(s"FINISH ANALYZE CLOSURE " + name)
-    super.visitEnd
+    analyze[T](closure, applyMethod)
   }
 
-  private def opcodeString(opcode: Int): String = {
-    Printer.OPCODES(opcode)
+  private def print(method: MethodNode): Unit = {
+    val printer = new Textifier
+    method.accept(new TraceMethodVisitor(printer))
+    val writer = new PrintWriter(System.out)
+    printer.print(writer)
+    writer.flush()
   }
 
-  private def analyze(applyMethod: MethodNode): Node = {
+  private def analyze[T: ClassTag](closure: Class[_], applyMethod: MethodNode): Node = {
     if(applyMethod.tryCatchBlocks.size() != 0) {
       throw new ByteCodeParserExecption("try...catch... is not allowed in ByteCodeParser")
     }
 
     var localVars: Map[Int, Node] = Map.empty[Int, Node]
-    localVars += 0 -> This
-    localVars += 1 -> Argument
+    localVars += 0 -> This(Type.getType(closure))
+    localVars += 1 -> Argument(Type.getArgumentTypes(applyMethod.desc)(0))
 
     val instructions = applyMethod.instructions
 
@@ -355,29 +371,32 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
         val node = instructions.get(index)
         val opcode = node.getOpcode
         if (ByteCodeParser.UnsupportedOpcodes.contains(opcode)) {
-          throw new UnsupportedOpCodeException(opcode)
+          throw new UnsupportedOpcodeException(opcode)
         }
+
+
 
         node match {
           case method: MethodInsnNode =>
-            opcode match {
+            method.getOpcode match {
               case Opcodes.INVOKEVIRTUAL | Opcodes.INVOKESTATIC | Opcodes.INVOKESPECIAL |
-                Opcodes.H_INVOKEINTERFACE =>
+                   Opcodes.H_INVOKEINTERFACE =>
                 val className = Type.getObjectType(method.owner).getClassName
                 val methodName = method.name
                 val argumentTypes = Type.getArgumentTypes(method.desc)
+                val returnType = Type.getReturnType(method.desc)
                 val arguments = (0 until argumentTypes.length).toList.map {_ =>
                   stack.pop()
                 }.reverse
-                val obj = if (opcode == Opcodes.INVOKESTATIC) {
-                  Constant(null)
+                val obj = if (method.getOpcode == Opcodes.INVOKESTATIC) {
+                  null
                 } else {
                   stack.pop()
                 }
-                if (obj == Argument && arguments.length == 0) {
-                  stack.push(Field(methodName, obj))
+                if (obj.isInstanceOf[Argument] && arguments.length == 0) {
+                  stack.push(Field(methodName, obj, returnType))
                 } else {
-                  stack.push(FunctionCall(className, methodName, obj, arguments))
+                  stack.push(FunctionCall(className, methodName, obj, arguments, returnType))
                 }
             }
           case field: FieldInsnNode =>
@@ -389,7 +408,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
             }
 
           case intInstruction: IntInsnNode =>
-            opcode match {
+            intInstruction.getOpcode match {
               case Opcodes.BIPUSH | Opcodes.SIPUSH => stack.push(Constant(intInstruction.operand))
               case Opcodes.NEWARRAY =>
                 val count = stack.pop()
@@ -407,7 +426,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
             }
 
           case typeInstruction: TypeInsnNode =>
-            val array = opcode match {
+            val array = typeInstruction.getOpcode match {
               case Opcodes.ANEWARRAY =>
                 val count = stack.pop()
                 val className = Type.getObjectType(typeInstruction.desc).getClassName
@@ -423,6 +442,7 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
             def compareAndJump(comparator: (Node, Node)=> Node): Node = {
               val right = stack.pop()
               val left = stack.pop()
+
               val condition = left match {
                 case a@Arithmetic("-", _, _) if right == Constant(0) => comparator(a.left, a.right)
                 case _ => comparator(left, right)
@@ -433,7 +453,12 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
               If(condition, trueStatement, falseStatement)
             }
 
-            opcode match {
+            if (instructions.indexOf(jump.label) <= index) {
+              throw new UnsupportedOpcodeException(jump.getOpcode, "Backward jump is not supported " +
+                "because it creates a loop")
+            }
+
+            jump.getOpcode match {
               case Opcodes.IF_ICMPEQ | Opcodes.IF_ACMPEQ => result = Some(compareAndJump(Arithmetic.compareEqual))
               case Opcodes.IF_ICMPNE | Opcodes.IF_ACMPNE => result = Some(compareAndJump(Arithmetic.compareNotEqual))
               case Opcodes.IF_ICMPLT => result = Some(compareAndJump(Arithmetic.lessThan))
@@ -447,29 +472,31 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 stack.push(Constant(null))
                 result = Some(compareAndJump(Arithmetic.compareNotEqual))
               case Opcodes.IFEQ =>
-                stack.push(Constant(0L))
+                stack.push(Constant(0))
                 result = Some(compareAndJump(Arithmetic.compareEqual))
               case Opcodes.IFNE =>
-                stack.push(Constant(0L))
+                stack.push(Constant(0))
                 result = Some(compareAndJump(Arithmetic.compareNotEqual))
               case Opcodes.IFLT =>
-                stack.push(Constant(0L))
+                stack.push(Constant(0))
                 result = Some(compareAndJump(Arithmetic.lessThan))
               case Opcodes.IFGT =>
-                stack.push(Constant(0L))
+                stack.push(Constant(0))
                 result = Some(compareAndJump(Arithmetic.greaterThan))
               case Opcodes.IFLE =>
-                stack.push(Constant(0L))
+                stack.push(Constant(0))
                 result = Some(compareAndJump(Arithmetic.lessEqualThan))
               case Opcodes.IFGE =>
-                stack.push(Constant(0L))
+                stack.push(Constant(0))
                 result = Some(compareAndJump(Arithmetic.greaterEqualThan))
               case Opcodes.GOTO =>
                 index = instructions.indexOf(jump.label)
             }
+
+          // TODO: Check this to make sure the type system works!!!
           case loadConstant: LdcInsnNode => stack.push(Constant(loadConstant.cst))
           case localVarible: VarInsnNode =>
-            opcode match {
+            localVarible.getOpcode match {
               case Opcodes.ILOAD | Opcodes.LLOAD | Opcodes.FLOAD | Opcodes.DLOAD | Opcodes.ALOAD =>
                 stack.push(localVars(localVarible.`var`))
               case Opcodes.ISTORE | Opcodes.LSTORE |
@@ -478,16 +505,16 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 localVars += localVarible.`var` -> top
             }
           case instruction: InsnNode =>
-            opcode match {
+            instruction.getOpcode match {
               case Opcodes.NOP => // Skip
               case Opcodes.ACONST_NULL => stack.push(Constant(null))
-              case Opcodes.ICONST_M1 => stack.push(Constant(-1L))
-              case Opcodes.ICONST_0 => stack.push(Constant(0L))
-              case Opcodes.ICONST_1 => stack.push(Constant(1L))
-              case Opcodes.ICONST_2 => stack.push(Constant(2L))
-              case Opcodes.ICONST_3 => stack.push(Constant(3L))
-              case Opcodes.ICONST_4 => stack.push(Constant(4L))
-              case Opcodes.ICONST_5 => stack.push(Constant(5L))
+              case Opcodes.ICONST_M1 => stack.push(Constant(-1))
+              case Opcodes.ICONST_0 => stack.push(Constant(0))
+              case Opcodes.ICONST_1 => stack.push(Constant(1))
+              case Opcodes.ICONST_2 => stack.push(Constant(2))
+              case Opcodes.ICONST_3 => stack.push(Constant(3))
+              case Opcodes.ICONST_4 => stack.push(Constant(4))
+              case Opcodes.ICONST_5 => stack.push(Constant(5))
               case Opcodes.LCONST_0 => stack.push(Constant(0L))
               case Opcodes.LCONST_1 => stack.push(Constant(1L))
               case Opcodes.FCONST_0 => stack.push(Constant(0D))
@@ -515,9 +542,18 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 val right = stack.pop()
                 val left = stack.pop()
                 stack.push(Arithmetic.rem(left, right))
-              case Opcodes.INEG | Opcodes.LNEG | Opcodes.FNEG | Opcodes.DNEG =>
+              case Opcodes.INEG =>
+                val top = stack.pop()
+                stack.push(Arithmetic.minus(Constant(0), top))
+              case Opcodes.LNEG =>
                 val top = stack.pop()
                 stack.push(Arithmetic.minus(Constant(0L), top))
+              case Opcodes.FNEG | Opcodes.DNEG =>
+                val top = stack.pop()
+                stack.push(Arithmetic.minus(Constant(0F), top))
+              case Opcodes.DNEG =>
+                val top = stack.pop()
+                stack.push(Arithmetic.minus(Constant(0D), top))
               case Opcodes.IAND | Opcodes.LAND =>
                 val right = stack.pop()
                 val left = stack.pop()
@@ -545,13 +581,13 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 val nextInstruction = instructions.get(index + 1)
                 nextInstruction.getOpcode match {
                   case Opcodes.IFEQ | Opcodes.IFNE | Opcodes.IFLT | Opcodes.IFGT | Opcodes.IFLE |
-                    Opcodes.IFGE =>
+                       Opcodes.IFGE =>
                     val right = stack.pop()
                     val left = stack.pop()
                     stack.push(Arithmetic.minus(left, right))
                   case _ =>
-                    throw new UnsupportedOpCodeException(
-                      opcode, s"${Printer.OPCODES(opcode)} need be followed by a jump instruction like " +
+                    throw new UnsupportedOpcodeException(
+                      opcode, s"${Printer.OPCODES(instruction.getOpcode)} need be followed by a jump instruction like " +
                         s"IFEQ, IFNE, IFLT, IFGT, IFLE, IFGE")
                 }
               case Opcodes.POP | Opcodes.POP2 =>
@@ -563,16 +599,18 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 val array = stack.pop()
                 array match  {
                   case ArrayNode(length, _) => stack.push(length)
+                  case x => throw new ByteCodeParserExecption("Expect an array from stack, but " +
+                    s"we get ${x.getClass.getSimpleName}")
                 }
               case Opcodes.IALOAD | Opcodes.LALOAD | Opcodes.FALOAD | Opcodes.DALOAD |
                    Opcodes.AALOAD | Opcodes.BALOAD | Opcodes.CALOAD | Opcodes.SALOAD =>
                 val index = stack.pop()
                 val array = stack.pop()
                 (index, array) match {
-                  case (Constant(index: Long), node@ ArrayNode(_, _)) =>
-                    stack.push(node.get(index.toInt))
+                  case (Constant(index: Int), node@ ArrayNode(_, _)) =>
+                    stack.push(node.get(index))
                   case _ =>
-                    throw new UnsupportedOpCodeException(opcode)
+                    throw new UnsupportedOpcodeException(instruction.getOpcode)
                 }
               case Opcodes.IASTORE | Opcodes.LASTORE | Opcodes.FASTORE | Opcodes.DASTORE |
                    Opcodes.AASTORE | Opcodes.BASTORE | Opcodes.CASTORE | Opcodes.SASTORE =>
@@ -580,16 +618,16 @@ class ByteCodeParser[T: ClassTag](_cv: ClassVisitor, p: Printer, pw: PrintWriter
                 val index = stack.pop()
                 val array = stack.pop()
                 (index, array) match {
-                  case (Constant(index: Long), arrayNode@ ArrayNode(_, _)) =>
+                  case (Constant(index: Int), arrayNode@ ArrayNode(_, _)) =>
                     arrayNode.put(index, data)
                   case _ =>
-                    throw new UnsupportedOpCodeException(opcode)
+                    throw new UnsupportedOpcodeException(instruction.getOpcode)
                 }
               case Opcodes.DRETURN | Opcodes.FRETURN | Opcodes.IRETURN | Opcodes.LRETURN |
                    Opcodes.ARETURN =>
                 result = Some(stack.pop())
               case Opcodes.RETURN =>
-                throw new UnsupportedOpCodeException(opcode)
+                throw new UnsupportedOpcodeException(opcode)
             }
           case label: LabelNode => // Skip pesudo code
           case lineNumber: LineNumberNode => // Skip pesudo code

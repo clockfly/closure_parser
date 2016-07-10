@@ -62,15 +62,27 @@ object Demo {
   }
 
   val closure7 = (e: ABC) => {
-   if (e.b > 3L) {
-     3
-   } else {
-     6
-   }
+   val c: ABC = null
+    c == null
+  }
+
+  val closure8 = (e: ABC) => {
+    if (e.a > 10.0) {
+      10
+    } else {
+      8
+    }
+  }
+
+  val closure9 = (e: ABC) => {
+    val array = new Array[Boolean](1)
+    array(0) = e.a > 10
+
+    array(0) && e.a < 12
   }
 
   def main(args: Array[String]): Unit = {
     val parser = new ByteCodeParser
-    parser.parse[ABC](closure7.getClass)
+    parser.parse[ABC](closure9.getClass)
   }
 }

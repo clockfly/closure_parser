@@ -1,15 +1,19 @@
 package spark.closure_poc
-import java.io.PrintWriter
+import java.io.{DataOutputStream, OutputStream, PrintStream, PrintWriter}
 
 import scala.reflect.ClassTag
 
 import org.objectweb.asm.{ClassReader, ClassVisitor, MethodVisitor, Opcodes, Type}
+import org.objectweb.asm.Opcodes._
+import org.objectweb.asm.Type._
 import org.objectweb.asm.util.{Printer, Textifier, TraceMethodVisitor}
 import scala.reflect._
 
-import org.objectweb.asm.tree.{FieldInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, LocalVariableNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
+import org.objectweb.asm.tree.{AbstractInsnNode, FieldInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, LocalVariableNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
 import scala.collection.JavaConverters._
+import scala.collection.immutable.Stack
 import scala.collection.mutable
+import scala.runtime.BoxesRunTime
 
 // TODO: Proof there is NO risk in using stack... (Double, and Long use 2 stack slots instad of 1)
 // https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-2.html#jvms-2.11.1
@@ -20,35 +24,25 @@ object ByteCodeParser {
 
   val UnsupportedOpcodes = Set(
     // InvokeDynamicInsnNode
-    Opcodes.INVOKEDYNAMIC,
-
+    INVOKEDYNAMIC,
     // FieldInsnNode
-    Opcodes.PUTFIELD, Opcodes.PUTSTATIC,
-
+    PUTFIELD, PUTSTATIC,
     // MultiANewArrayInsnNode
-    Opcodes.MULTIANEWARRAY,
-
-    // TypeInsnNode
-    Opcodes.NEW, Opcodes.CHECKCAST, Opcodes.INSTANCEOF,
-
+    MULTIANEWARRAY,
     // JumpInsnNode, JSR is not used by Java compile since JDK6.
-    Opcodes.JSR,
-
+    JSR,
     // VarInsnNode, RET is not used by Java compile since JDK6.
-    Opcodes.RET,
-
+    RET,
+    // TypeInsnNode
+    NEW, CHECKCAST, INSTANCEOF,
     // InsnNode
-    Opcodes.POP2, Opcodes.DUP, Opcodes.DUP_X1, Opcodes.DUP_X2, Opcodes.DUP2,
-    Opcodes.DUP2_X1, Opcodes.DUP2_X2, Opcodes.SWAP,
-    Opcodes.ISHL, Opcodes.LSHL, Opcodes.ISHR, Opcodes.LSHR,Opcodes.IUSHR, Opcodes.LUSHR,
-    Opcodes.ATHROW,
-    Opcodes.MONITORENTER, Opcodes.MONITOREXIT,
-
+    ISHL, LSHL, ISHR, LSHR,IUSHR, LUSHR,
+    ATHROW,
+    MONITORENTER, MONITOREXIT,
     // TableSwitchInsnNode
-    Opcodes.TABLESWITCH,
-
+    TABLESWITCH,
     // LookupSwitchInsnNode
-    Opcodes.LOOKUPSWITCH
+    LOOKUPSWITCH
   )
 
   class ByteCodeParserExecption(message: String) extends Exception(message)
@@ -79,15 +73,12 @@ object ByteCodeParser {
     override def children: List[Node] = List.empty[Node]
   }
 
+  case object VOID extends NullaryNode {
+    override def dataType: Type = Type.VOID_TYPE
+  }
+
   case class Constant[T: ClassTag](value: T) extends NullaryNode {
     def dataType: Type = Type.getType(classTag[T].runtimeClass)
-    override def equals(other: Any): Boolean = {
-      other match {
-        case Constant(v2) => value == v2
-        case _ => false
-      }
-    }
-    Console.println("DATATYPE: " + dataType)
   }
 
   case class Argument(dataType: Type) extends NullaryNode
@@ -95,8 +86,6 @@ object ByteCodeParser {
   case class This(dataType: Type) extends NullaryNode
 
   case class Field(fieldName: String, node: Node, dataType: Type) extends NullaryNode
-
-  val x = Cast[Long](null)
 
   // if (condition == true) left else right
   case class If(condition: Node, left: Node, right: Node) extends BinaryNode {
@@ -108,11 +97,10 @@ object ByteCodeParser {
   }
 
   case class Cast[T: ClassTag](node: Node) extends UnaryNode {
-    implicit val tag = classTag[T]
     override def nodeName: String = {
-      s"Cast[${tag.toString()}]"
+      s"Cast[${classTag[T].toString()}]"
     }
-    override def dataType: Type = Type.getType(tag.runtimeClass)
+    override def dataType: Type = Type.getType(classTag[T].runtimeClass)
   }
 
   def treeString(node: Node): String = {
@@ -140,6 +128,7 @@ object ByteCodeParser {
 
   case class ArrayNode[T: ClassTag](
     length: Node,
+    defaultValue: T,
     data: mutable.Map[Int, Node] = mutable.Map.empty[Int, Node]) extends Node {
 
     if (length.dataType != Type.INT_TYPE) {
@@ -150,7 +139,7 @@ object ByteCodeParser {
     override def dataType: Type = Type.getType(s"[${elementDataType.getDescriptor}")
 
     override def children: List[Node] = data.values.toList
-    def get(index: Int): Node = data.getOrElse(index, Constant(0L))
+    def get(index: Int): Node = data.getOrElse(index, Constant(defaultValue))
     def put(index: Int, value: Node): Unit = {
       if (value.dataType != elementDataType) {
         throw new ByteCodeParserExecption("element type's type mismatch ArrayNode's type argument")
@@ -170,7 +159,9 @@ object ByteCodeParser {
     def dataType: Type = left.dataType
   }
 
-  object Arithmetic {
+  object DSL {
+    // DO optimization before creating a node...
+
     def plus(left: Node, right: Node): Node = {
       // 1. check the type of left and right to make sure they match
       // 2. if there are Constant
@@ -179,6 +170,8 @@ object ByteCodeParser {
       // return value..
 
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a + b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a + b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a + b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a + b)
         case _ => Arithmetic("+", left, right)
@@ -187,6 +180,8 @@ object ByteCodeParser {
 
     def minus(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a - b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a - b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a - b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a - b)
         case _ => Arithmetic("-", left, right)
@@ -195,6 +190,8 @@ object ByteCodeParser {
 
     def mul(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a * b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a * b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a * b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a * b)
         case _ => Arithmetic("*", left, right)
@@ -203,6 +200,8 @@ object ByteCodeParser {
 
     def div(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a / b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a / b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a / b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a / b)
         case _ => Arithmetic("/", left, right)
@@ -211,6 +210,8 @@ object ByteCodeParser {
 
     def rem(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a % b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a % b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a % b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a % b)
         case _ => Arithmetic("%", left, right)
@@ -243,6 +244,8 @@ object ByteCodeParser {
 
     def compareEqual(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a == b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a == b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a == b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a == b)
         case _ => Arithmetic("==", left, right)
@@ -251,6 +254,8 @@ object ByteCodeParser {
 
     def compareNotEqual(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a != b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a != b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a != b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a != b)
         case _ => Arithmetic("!=", left, right)
@@ -259,6 +264,8 @@ object ByteCodeParser {
 
     def lessThan(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a < b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a < b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a < b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a < b)
         case _ => Arithmetic("<", left, right)
@@ -267,6 +274,9 @@ object ByteCodeParser {
 
     def greaterThan(left: Node, right: Node): Node = {
       (left, right) match {
+
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a > b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a > b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a > b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a > b)
         case _ => Arithmetic(">", left, right)
@@ -275,6 +285,8 @@ object ByteCodeParser {
 
     def lessEqualThan(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a <= b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a <= b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a <= b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a <= b)
         case _ => Arithmetic("<=", left, right)
@@ -283,16 +295,56 @@ object ByteCodeParser {
 
     def greaterEqualThan(left: Node, right: Node): Node = {
       (left, right) match {
+        case (Constant(a: Int), Constant(b: Int)) => Constant(a >= b)
+        case (Constant(a: Float), Constant(b: Float)) => Constant(a >= b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a >= b)
         case (Constant(a: Double), Constant(b: Double)) => Constant(a >= b)
         case _ => Arithmetic(">=", left, right)
       }
+    }
+
+    def cast[T: ClassTag](node: Node): Node = {
+      Cast[T](node)
+    }
+  }
+
+  class MethodTracer(method: MethodNode, trace: Boolean = true, out: PrintStream = System.out) {
+
+    private val printer = new Textifier
+    private val visitor = new TraceMethodVisitor(printer)
+    private val text = printer.getText.asInstanceOf[java.util.List[AnyRef]]
+
+    if (trace) {
+      method.accept(visitor)
+      flush()
+      out.println(s"Start tracing method ${method.name}:")
+      out.println("===============================================")
+    }
+
+    def trace(stack: Stack[Node], instruction: AbstractInsnNode): Unit = {
+      if (this.trace) {
+        instruction.accept(visitor)
+        if (instruction.getOpcode >= 0) {
+          val stackString = if (stack.length != 0) s"stack: ${stack.mkString(",")}\n" else ""
+          val instructionString = text.get(text.size() - 1).toString
+          text.set(text.size() - 1, s"$stackString$instructionString")
+        }
+      }
+    }
+
+    def flush(): Unit = {
+      (0 until text.size()).foreach { line =>
+        out.print(text.get(line).toString)
+      }
+      out.flush()
+      text.clear()
     }
   }
 }
 
 class ByteCodeParser {
   import spark.closure_poc.ByteCodeParser._
+
   private def trace: Boolean = true
 
   def parse[T: ClassTag](closure: Class[_]): Unit = {
@@ -300,7 +352,7 @@ class ByteCodeParser {
 
     val reader = new ClassReader(closure.getName)
 
-    reader.accept(new ClassVisitor(Opcodes.ASM5, null) {
+    reader.accept(new ClassVisitor(ASM5, null) {
       override def visitMethod(access: Int, name: String, desc: String, signature: String, exceptions: Array[String]): MethodVisitor = {
         if (isApplyMethod[T](name, desc)) {
           val method = new MethodNode(access, name, desc, signature, exceptions)
@@ -335,18 +387,7 @@ class ByteCodeParser {
     // Pick the first one if there are multiple apply method found
     val applyMethod = applyMethods.head
 
-    if (trace) {
-      print(applyMethod)
-    }
     analyze[T](closure, applyMethod)
-  }
-
-  private def print(method: MethodNode): Unit = {
-    val printer = new Textifier
-    method.accept(new TraceMethodVisitor(printer))
-    val writer = new PrintWriter(System.out)
-    printer.print(writer)
-    writer.flush()
   }
 
   private def analyze[T: ClassTag](closure: Class[_], applyMethod: MethodNode): Node = {
@@ -358,14 +399,25 @@ class ByteCodeParser {
     localVars += 0 -> This(Type.getType(closure))
     localVars += 1 -> Argument(Type.getArgumentTypes(applyMethod.desc)(0))
 
+    val tracer = new MethodTracer(applyMethod, trace = true)
     val instructions = applyMethod.instructions
 
     def invoke(
         instructions: InsnList,
         startIndex: Int,
-        stack: mutable.Stack[Node] = new mutable.Stack[Node]()): ByteCodeParser.Node = {
+        inputStack: Stack[Node] = new Stack[Node]()): ByteCodeParser.Node = {
       var result: Option[Node] = None
       var index = startIndex
+      var stack = inputStack
+      def pop(): Node = {
+        val top = stack.top
+        stack = stack.pop
+        top
+      }
+
+      def push(node: Node): Unit = {
+        stack = stack.push(node)
+      }
 
       while (index < instructions.size() && result.isEmpty) {
         val node = instructions.get(index)
@@ -374,74 +426,66 @@ class ByteCodeParser {
           throw new UnsupportedOpcodeException(opcode)
         }
 
-
+        tracer.trace(stack, node)
 
         node match {
           case method: MethodInsnNode =>
             method.getOpcode match {
-              case Opcodes.INVOKEVIRTUAL | Opcodes.INVOKESTATIC | Opcodes.INVOKESPECIAL |
-                   Opcodes.H_INVOKEINTERFACE =>
+              case INVOKEVIRTUAL | INVOKESTATIC | INVOKESPECIAL | H_INVOKEINTERFACE =>
                 val className = Type.getObjectType(method.owner).getClassName
                 val methodName = method.name
                 val argumentTypes = Type.getArgumentTypes(method.desc)
                 val returnType = Type.getReturnType(method.desc)
                 val arguments = (0 until argumentTypes.length).toList.map {_ =>
-                  stack.pop()
+                  pop()
                 }.reverse
-                val obj = if (method.getOpcode == Opcodes.INVOKESTATIC) {
+                val obj = if (method.getOpcode == INVOKESTATIC) {
                   null
                 } else {
-                  stack.pop()
+                  pop()
                 }
                 if (obj.isInstanceOf[Argument] && arguments.length == 0) {
-                  stack.push(Field(methodName, obj, returnType))
+                  push(Field(methodName, obj, returnType))
                 } else {
-                  stack.push(FunctionCall(className, methodName, obj, arguments, returnType))
+                  push(FunctionCall(className, methodName, obj, arguments, returnType))
                 }
             }
+          // TODO: figure out this!!!
           case field: FieldInsnNode =>
             field.getOpcode match {
-              case Opcodes.GETFIELD =>
+              case GETFIELD =>
                 Console.println("Opcodes.GETFIELD")
-              case Opcodes.GETSTATIC =>
-                Console.println("Opcodes.GETSTATIC")
+              case GETSTATIC =>
+                Console.println("GETSTATIC")
             }
 
           case intInstruction: IntInsnNode =>
             intInstruction.getOpcode match {
-              case Opcodes.BIPUSH | Opcodes.SIPUSH => stack.push(Constant(intInstruction.operand))
-              case Opcodes.NEWARRAY =>
-                val count = stack.pop()
+              case BIPUSH | SIPUSH => push(Constant(intInstruction.operand))
+              case NEWARRAY =>
+                val count = pop()
                 val array = intInstruction.operand match {
-                  case Opcodes.T_BOOLEAN => ArrayNode[Boolean](count)
-                  case Opcodes.T_CHAR => ArrayNode[Char](count)
-                  case Opcodes.T_FLOAT => ArrayNode[Float](count)
-                  case Opcodes.T_DOUBLE => ArrayNode[Double](count)
-                  case Opcodes.T_BYTE => ArrayNode[Byte](count)
-                  case Opcodes.T_SHORT => ArrayNode[Short](count)
-                  case Opcodes.T_INT => ArrayNode[Int](count)
-                  case Opcodes.T_LONG => ArrayNode[Long](count)
+                  case T_BOOLEAN | T_BYTE | T_CHAR | T_SHORT | T_INT => ArrayNode[Int](count, 0)
+                  case T_FLOAT => ArrayNode[Float](count, 0F)
+                  case T_DOUBLE => ArrayNode[Double](count, 0D)
+                  case T_LONG => ArrayNode[Long](count, 0L)
                 }
-                stack.push(array)
+                push(array)
             }
 
           case typeInstruction: TypeInsnNode =>
             val array = typeInstruction.getOpcode match {
-              case Opcodes.ANEWARRAY =>
-                val count = stack.pop()
-                val className = Type.getObjectType(typeInstruction.desc).getClassName
-                val clazz = Thread.currentThread().getContextClassLoader.loadClass(className)
-                ArrayNode[AnyRef](count)(ClassTag(clazz))
+              case ANEWARRAY => ArrayNode[AnyRef](pop(), null)
             }
-            stack.push(array)
+            push(array)
           case iinc: IincInsnNode =>
             val localVar = localVars(iinc.`var`)
-            localVars += iinc.`var` -> Arithmetic.plus(localVar, Constant(iinc.incr))
+            localVars += iinc.`var` -> DSL.plus(localVar, Constant(iinc.incr))
           case jump: JumpInsnNode =>
             // compareOperator: <, >, ==, <=, >=
-            def compareAndJump(comparator: (Node, Node)=> Node): Node = {
-              val right = stack.pop()
-              val left = stack.pop()
+            def compareAndJump(comparator: (Node, Node) => Node): Node = {
+              val right = pop()
+              val left = pop()
 
               val condition = left match {
                 case a@Arithmetic("-", _, _) if right == Constant(0) => comparator(a.left, a.right)
@@ -450,191 +494,307 @@ class ByteCodeParser {
 
               val trueStatement = invoke(instructions, instructions.indexOf(jump.label), stack)
               val falseStatement = invoke(instructions, index + 1, stack)
-              If(condition, trueStatement, falseStatement)
+              if (condition == Constant(true)) {
+                trueStatement
+              } else if (condition == Constant(false)) {
+                falseStatement
+              } else {
+                If(condition, trueStatement, falseStatement)
+              }
             }
 
             if (instructions.indexOf(jump.label) <= index) {
               throw new UnsupportedOpcodeException(jump.getOpcode, "Backward jump is not supported " +
-                "because it creates a loop")
+                "because it may create a loop")
             }
 
             jump.getOpcode match {
-              case Opcodes.IF_ICMPEQ | Opcodes.IF_ACMPEQ => result = Some(compareAndJump(Arithmetic.compareEqual))
-              case Opcodes.IF_ICMPNE | Opcodes.IF_ACMPNE => result = Some(compareAndJump(Arithmetic.compareNotEqual))
-              case Opcodes.IF_ICMPLT => result = Some(compareAndJump(Arithmetic.lessThan))
-              case Opcodes.IF_ICMPGT => result = Some(compareAndJump(Arithmetic.greaterThan))
-              case Opcodes.IF_ICMPLE => result = Some(compareAndJump(Arithmetic.lessEqualThan))
-              case Opcodes.IF_ICMPGE => result = Some(compareAndJump(Arithmetic.greaterEqualThan))
-              case Opcodes.IFNULL =>
-                stack.push(Constant(null))
-                result = Some(compareAndJump(Arithmetic.compareEqual))
-              case Opcodes.IFNONNULL =>
-                stack.push(Constant(null))
-                result = Some(compareAndJump(Arithmetic.compareNotEqual))
-              case Opcodes.IFEQ =>
-                stack.push(Constant(0))
-                result = Some(compareAndJump(Arithmetic.compareEqual))
-              case Opcodes.IFNE =>
-                stack.push(Constant(0))
-                result = Some(compareAndJump(Arithmetic.compareNotEqual))
-              case Opcodes.IFLT =>
-                stack.push(Constant(0))
-                result = Some(compareAndJump(Arithmetic.lessThan))
-              case Opcodes.IFGT =>
-                stack.push(Constant(0))
-                result = Some(compareAndJump(Arithmetic.greaterThan))
-              case Opcodes.IFLE =>
-                stack.push(Constant(0))
-                result = Some(compareAndJump(Arithmetic.lessEqualThan))
-              case Opcodes.IFGE =>
-                stack.push(Constant(0))
-                result = Some(compareAndJump(Arithmetic.greaterEqualThan))
-              case Opcodes.GOTO =>
-                index = instructions.indexOf(jump.label)
+              case IF_ICMPEQ | IF_ACMPEQ =>
+                result = Some(compareAndJump(DSL.compareEqual))
+              case IF_ICMPNE | IF_ACMPNE =>
+                result = Some(compareAndJump(DSL.compareNotEqual))
+              case IF_ICMPLT =>
+                result = Some(compareAndJump(DSL.lessThan))
+              case IF_ICMPGT =>
+                result = Some(compareAndJump(DSL.greaterThan))
+              case IF_ICMPLE =>
+                result = Some(compareAndJump(DSL.lessEqualThan))
+              case IF_ICMPGE =>
+                result = Some(compareAndJump(DSL.greaterEqualThan))
+              case IFNULL =>
+                push(Constant(null))
+                result = Some(compareAndJump(DSL.compareEqual))
+              case IFNONNULL =>
+                push(Constant(null))
+                result = Some(compareAndJump(DSL.compareNotEqual))
+              case GOTO =>
+                index = instructions.indexOf(jump.label) - 1
+              case IFEQ =>
+                push(Constant(0))
+                result = Some(compareAndJump(DSL.compareEqual))
+              case IFNE =>
+                push(Constant(0))
+                result = Some(compareAndJump(DSL.compareNotEqual))
+              case IFLT =>
+                push(Constant(0))
+                result = Some(compareAndJump(DSL.lessThan))
+              case IFGT =>
+                push(Constant(0))
+                result = Some(compareAndJump(DSL.greaterThan))
+              case IFLE =>
+                push(Constant(0))
+                result = Some(compareAndJump(DSL.lessEqualThan))
+              case IFGE =>
+                push(Constant(0))
+                result = Some(compareAndJump(DSL.greaterEqualThan))
             }
-
-          // TODO: Check this to make sure the type system works!!!
-          case loadConstant: LdcInsnNode => stack.push(Constant(loadConstant.cst))
+          case loadConstant: LdcInsnNode => {
+            val constant = loadConstant.cst
+            constant match {
+              case i: java.lang.Integer => push(Constant[Int](i))
+              case f: java.lang.Float => push(Constant[Float](f))
+              case d: java.lang.Double => push(Constant[Double](d))
+              case l: java.lang.Long => push(Constant[Long](l))
+              case str: java.lang.String => push(Constant[String](str))
+              case other =>
+                throw new UnsupportedOpcodeException(
+                  loadConstant.getOpcode,
+                  s"LDC only supports type Int, Float, Double, Long and String, current type is" +
+                    s"${other.getClass.getName}")
+            }
+          }
           case localVarible: VarInsnNode =>
             localVarible.getOpcode match {
-              case Opcodes.ILOAD | Opcodes.LLOAD | Opcodes.FLOAD | Opcodes.DLOAD | Opcodes.ALOAD =>
-                stack.push(localVars(localVarible.`var`))
-              case Opcodes.ISTORE | Opcodes.LSTORE |
-                   Opcodes.FSTORE | Opcodes.DSTORE | Opcodes.ASTORE =>
-                val top = stack.pop()
+              case ILOAD | LLOAD | FLOAD | DLOAD | ALOAD =>
+                push(localVars(localVarible.`var`))
+              case ISTORE | LSTORE | FSTORE | DSTORE | ASTORE =>
+                val top = pop()
                 localVars += localVarible.`var` -> top
             }
           case instruction: InsnNode =>
             instruction.getOpcode match {
-              case Opcodes.NOP => // Skip
-              case Opcodes.ACONST_NULL => stack.push(Constant(null))
-              case Opcodes.ICONST_M1 => stack.push(Constant(-1))
-              case Opcodes.ICONST_0 => stack.push(Constant(0))
-              case Opcodes.ICONST_1 => stack.push(Constant(1))
-              case Opcodes.ICONST_2 => stack.push(Constant(2))
-              case Opcodes.ICONST_3 => stack.push(Constant(3))
-              case Opcodes.ICONST_4 => stack.push(Constant(4))
-              case Opcodes.ICONST_5 => stack.push(Constant(5))
-              case Opcodes.LCONST_0 => stack.push(Constant(0L))
-              case Opcodes.LCONST_1 => stack.push(Constant(1L))
-              case Opcodes.FCONST_0 => stack.push(Constant(0D))
-              case Opcodes.FCONST_1 => stack.push(Constant(1D))
-              case Opcodes.FCONST_2 => stack.push(Constant(2D))
-              case Opcodes.DCONST_0 => stack.push(Constant(0D))
-              case Opcodes.DCONST_1 => stack.push(Constant(1D))
-              case Opcodes.IADD | Opcodes.LADD | Opcodes.FADD | Opcodes.DADD =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.plus(left, right))
-              case Opcodes.ISUB | Opcodes.LSUB | Opcodes.FSUB | Opcodes.DSUB =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.minus(left, right))
-              case Opcodes.IMUL | Opcodes.LMUL | Opcodes.FMUL | Opcodes.DMUL =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.mul(left, right))
-              case Opcodes.IDIV | Opcodes.LDIV | Opcodes.FDIV | Opcodes.DDIV =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.div(left, right))
-              case Opcodes.IREM | Opcodes.LREM | Opcodes.FREM | Opcodes.DREM =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.rem(left, right))
-              case Opcodes.INEG =>
-                val top = stack.pop()
-                stack.push(Arithmetic.minus(Constant(0), top))
-              case Opcodes.LNEG =>
-                val top = stack.pop()
-                stack.push(Arithmetic.minus(Constant(0L), top))
-              case Opcodes.FNEG | Opcodes.DNEG =>
-                val top = stack.pop()
-                stack.push(Arithmetic.minus(Constant(0F), top))
-              case Opcodes.DNEG =>
-                val top = stack.pop()
-                stack.push(Arithmetic.minus(Constant(0D), top))
-              case Opcodes.IAND | Opcodes.LAND =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.and(left, right))
-              case Opcodes.IOR | Opcodes.LOR =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.or(left, right))
-              case Opcodes.IXOR | Opcodes.LXOR =>
-                val right = stack.pop()
-                val left = stack.pop()
-                stack.push(Arithmetic.xor(left, right))
-              case Opcodes.I2L | Opcodes.F2L | Opcodes.D2L =>
-                stack.push(Cast[Long](stack.pop))
-              case Opcodes.L2I | Opcodes.F2I | Opcodes.D2I =>
-                stack.push(Cast[Int](stack.pop))
-              case Opcodes.I2F | Opcodes.L2F | Opcodes.D2F =>
-                stack.push(Cast[Float](stack.pop))
-              case Opcodes.I2D | Opcodes.L2D | Opcodes.F2D =>
-                stack.push(Cast[Double](stack.pop))
-              case Opcodes.I2B => stack.push(Cast[Byte](stack.pop))
-              case Opcodes.I2C => stack.push(Cast[String](stack.pop))
-              case Opcodes.I2S => stack.push(Cast[Short](stack.pop))
-              case Opcodes.LCMP | Opcodes.FCMPL | Opcodes.FCMPG | Opcodes.DCMPL | Opcodes.DCMPG =>
-                val nextInstruction = instructions.get(index + 1)
-                nextInstruction.getOpcode match {
-                  case Opcodes.IFEQ | Opcodes.IFNE | Opcodes.IFLT | Opcodes.IFGT | Opcodes.IFLE |
-                       Opcodes.IFGE =>
-                    val right = stack.pop()
-                    val left = stack.pop()
-                    stack.push(Arithmetic.minus(left, right))
+              case NOP => // Skip
+              case ACONST_NULL => push(Constant(null))
+              case ICONST_M1 => push(Constant(-1))
+              case ICONST_0 => push(Constant(0))
+              case ICONST_1 => push(Constant(1))
+              case ICONST_2 => push(Constant(2))
+              case ICONST_3 => push(Constant(3))
+              case ICONST_4 => push(Constant(4))
+              case ICONST_5 => push(Constant(5))
+              case LCONST_0 => push(Constant(0L))
+              case LCONST_1 => push(Constant(1L))
+              case FCONST_0 => push(Constant(0D))
+              case FCONST_1 => push(Constant(1D))
+              case FCONST_2 => push(Constant(2D))
+              case DCONST_0 => push(Constant(0D))
+              case DCONST_1 => push(Constant(1D))
+              case IADD | LADD | FADD | DADD =>
+                val right = pop()
+                val left = pop()
+                push(DSL.plus(left, right))
+              case ISUB | LSUB | FSUB | DSUB =>
+                val right = pop()
+                val left = pop()
+                push(DSL.minus(left, right))
+              case IMUL | LMUL | FMUL | DMUL =>
+                val right = pop()
+                val left = pop()
+                push(DSL.mul(left, right))
+              case IDIV | LDIV | FDIV | DDIV =>
+                val right = pop()
+                val left = pop()
+                push(DSL.div(left, right))
+              case IREM | LREM | FREM | DREM =>
+                val right = pop()
+                val left = pop()
+                push(DSL.rem(left, right))
+              case INEG =>
+                val top = pop()
+                push(DSL.minus(Constant(0), top))
+              case LNEG =>
+                val top = pop()
+                push(DSL.minus(Constant(0L), top))
+              case FNEG | DNEG =>
+                val top = pop()
+                push(DSL.minus(Constant(0F), top))
+              case DNEG =>
+                val top = pop()
+                push(DSL.minus(Constant(0D), top))
+              case IAND | LAND =>
+                val right = pop()
+                val left = pop()
+                push(DSL.and(left, right))
+              case IOR | LOR =>
+                val right = pop()
+                val left = pop()
+                push(DSL.or(left, right))
+              case IXOR | LXOR =>
+                val right = pop()
+                val left = pop()
+                push(DSL.xor(left, right))
+              case I2L | F2L | D2L =>
+                push(DSL.cast[Long](pop))
+              case L2I | F2I | D2I =>
+                push(DSL.cast[Int](pop))
+              case I2F | L2F | D2F =>
+                push(DSL.cast[Float](pop))
+              case I2D | L2D | F2D =>
+                push(DSL.cast[Double](pop))
+              case I2B => push(DSL.cast[Byte](pop))
+              case I2C => push(DSL.cast[String](pop))
+              case I2S => push(DSL.cast[Short](pop))
+              case LCMP | FCMPL | FCMPG | DCMPL | DCMPG =>
+                val jump = instructions.get(index + 1).getOpcode match {
+                  case IFEQ | IFNE | IFLT | IFGT | IFLE | IFGE =>
+                    instructions.get(index + 1).asInstanceOf[JumpInsnNode]
                   case _ =>
                     throw new UnsupportedOpcodeException(
-                      opcode, s"${Printer.OPCODES(instruction.getOpcode)} need be followed by a jump instruction like " +
-                        s"IFEQ, IFNE, IFLT, IFGT, IFLE, IFGE")
+                      opcode,
+                      s"${Printer.OPCODES(instruction.getOpcode)} need be followed by a jump " +
+                        s"instruction like IFEQ, IFNE, IFLT, IFGT, IFLE, IFGE")
                 }
-              case Opcodes.POP | Opcodes.POP2 =>
-                // TODO: Long and Double element take two stack slots. We need to make sure POP2
-                // only pop ONE element.
-                stack.pop()
 
-              case Opcodes.ARRAYLENGTH =>
-                val array = stack.pop()
+                // Rewrite the instruction...
+                jump.getOpcode match {
+                  case IFEQ => jump.setOpcode(IF_ICMPEQ)
+                  case IFNE => jump.setOpcode(IF_ICMPNE)
+                  case IFLT => jump.setOpcode(IF_ICMPLT)
+                  case IFGT => jump.setOpcode(IF_ICMPGT)
+                  case IFLE => jump.setOpcode(IF_ICMPLE)
+                  case IFGE => jump.setOpcode(IF_ICMPGE)
+                }
+
+              case POP | POP2 | DUP | DUP2 | DUP_X1 | DUP_X2 | DUP2_X1 | DUP2_X2 | SWAP =>
+                // Each data type has a category, which affects the behavior of stack operations.
+                // JVM Category 2 types: Long, Double.
+                // JVM Category 1 types: Boolean, Byte, Char,Short, Int, Float, Reference,
+                // ReturnAddress.
+                // @See https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-2.html#jvms-2.11.1
+                val stackCategories = stack.toList.map(_.dataType).map { dataType =>
+                  dataType match {
+                    case LONG_TYPE | DOUBLE_TYPE => 2
+                    case _ => 1
+                  }
+                }
+
+                (instruction.getOpcode, stackCategories) match {
+                  case (POP, 1::_) => pop()
+                  case (POP2, 1::1::_) =>
+                    pop()
+                    pop()
+                  case (POP2, 2::_) => pop()
+                  case (DUP, 1::_) =>
+                    val top = pop()
+                    push(top)
+                    push(top)
+                  case (DUP2, 1::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    push(second)
+                    push(first)
+                    push(second)
+                    push(first)
+                  case (DUP2, 2::_) =>
+                    val top = pop()
+                    push(top)
+                    push(top)
+                  case (DUP_X1, 1::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    push(first)
+                    push(second)
+                    push(first)
+                  case (DUP_X2, 1::1::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    val third = pop()
+                    push(first)
+                    push(third)
+                    push(second)
+                    push(first)
+                  case (DUP_X2, 1::2::_) =>
+                    val first = pop()
+                    val second = pop()
+                    push(first)
+                    push(second)
+                    push(first)
+                  case (DUP2_X1, 1::1::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    val third = pop()
+                    push(second)
+                    push(first)
+                    push(third)
+                    push(second)
+                    push(first)
+                  case (DUP2_X1, 2::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    push(first)
+                    push(second)
+                    push(first)
+                  case (DUP2_X2, 1::1::1::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    val third = pop()
+                    val fourth = pop()
+                    push(second)
+                    push(first)
+                    push(fourth)
+                    push(third)
+                    push(second)
+                    push(first)
+                  case (DUP2_X2, 2::1::1::_) =>
+                    val first = pop()
+                    val second = pop()
+                    val third = pop()
+                    push(first)
+                    push(third)
+                    push(second)
+                    push(first)
+                  case (op, _) =>
+                    throw new UnsupportedOpcodeException(op, "Stack mismatch")
+                }
+              case ARRAYLENGTH =>
+                val array = pop()
                 array match  {
-                  case ArrayNode(length, _) => stack.push(length)
+                  case ArrayNode(length, _, _) => push(length)
                   case x => throw new ByteCodeParserExecption("Expect an array from stack, but " +
                     s"we get ${x.getClass.getSimpleName}")
                 }
-              case Opcodes.IALOAD | Opcodes.LALOAD | Opcodes.FALOAD | Opcodes.DALOAD |
-                   Opcodes.AALOAD | Opcodes.BALOAD | Opcodes.CALOAD | Opcodes.SALOAD =>
-                val index = stack.pop()
-                val array = stack.pop()
+              case IALOAD | LALOAD | FALOAD | DALOAD | AALOAD | BALOAD | CALOAD | SALOAD =>
+                val index = pop()
+                val array = pop()
                 (index, array) match {
-                  case (Constant(index: Int), node@ ArrayNode(_, _)) =>
-                    stack.push(node.get(index))
+                  case (Constant(index: Int), node@ ArrayNode(_, _, _)) =>
+                    push(node.get(index))
                   case _ =>
                     throw new UnsupportedOpcodeException(instruction.getOpcode)
                 }
-              case Opcodes.IASTORE | Opcodes.LASTORE | Opcodes.FASTORE | Opcodes.DASTORE |
-                   Opcodes.AASTORE | Opcodes.BASTORE | Opcodes.CASTORE | Opcodes.SASTORE =>
-                val data = stack.pop()
-                val index = stack.pop()
-                val array = stack.pop()
+              case IASTORE | LASTORE | FASTORE | DASTORE | AASTORE | BASTORE | CASTORE | SASTORE =>
+                val data = pop()
+                val index = pop()
+                val array = pop()
                 (index, array) match {
-                  case (Constant(index: Int), arrayNode@ ArrayNode(_, _)) =>
+                  case (Constant(index: Int), arrayNode@ ArrayNode(_, _, _)) =>
                     arrayNode.put(index, data)
                   case _ =>
                     throw new UnsupportedOpcodeException(instruction.getOpcode)
                 }
-              case Opcodes.DRETURN | Opcodes.FRETURN | Opcodes.IRETURN | Opcodes.LRETURN |
-                   Opcodes.ARETURN =>
-                result = Some(stack.pop())
-              case Opcodes.RETURN =>
-                throw new UnsupportedOpcodeException(opcode)
+              case DRETURN | FRETURN | IRETURN | LRETURN | ARETURN =>
+                result = Some(pop())
+              case RETURN =>
+                result = Some(VOID)
             }
           case label: LabelNode => // Skip pesudo code
           case lineNumber: LineNumberNode => // Skip pesudo code
           case frame: FrameNode => // Skip pesudo code
         }
+
         index += 1
       }
+      tracer.flush()
 
       if (result.isEmpty) {
         throw new ByteCodeParserExecption("Possibly not having return instructions")

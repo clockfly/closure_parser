@@ -1,6 +1,7 @@
 package spark.closure_poc
 
 import java.io.PrintWriter
+import java.lang.Long
 
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.util.TraceClassVisitor
@@ -81,8 +82,77 @@ object Demo {
     array(0) && e.a < 12
   }
 
+  class D {
+    val c: Int = 3
+  }
+
+  val closure10 = (e: D) => {
+    e.c
+  }
+
+  val closure11 = (e: ABC) => {
+    e.a.toByte
+  }
+
+  val closure12 = new MapFunction[ABC, Int] {
+    private val result = 3
+    override def call(value: ABC): Int = {
+      result
+    }
+  }
+
+  val closure13 = (s: Short) =>
+    (((s + 1) * 2 - 1) / 2) == 3
+
+  val closure14 = (s: Short) => s > 3
+
+  val closure15 = (s: Short) => (Math.sqrt(s) + Math.log10(s)) > 3
+
+  val closure16 = (s: Long) => (((s + 1L) * 2L - 1L) / 2L) == 3L
+
+  val closure17 = (s: String) => s.length > 3
+
+  val closure18 = (t: Tuple2[Int, Int]) => t._1 + t._2 > 4
+
+  // Problemic due to CheckCast...
+  val closure19 = (t: Tuple3[Int, Int, String]) => t._3.length > 2
+
+  val closure20 = (t: Tuple4[Int, Int, Int, Double]) => Math.sqrt(t._4) > 3.0
+
+  val closure21 = (t: Tuple3[Int, Int, String]) => t._3 != null
+
+  // Problemic...
+  val closure22 = (v: Long) => {
+    val result = new Long(v)
+    result
+  }
+
+  // Problemic
+  val closure23 = (v: Long) => {
+    val x: Int = v.toInt
+    x
+  }
+
+  def go: Int = 3
+
+  private final val gogo: Int = 4
+
+  val closure24 = (v: Long) => {
+    val result = go + gogo
+    result
+  }
+
+  val closure25 = (v: Int) => gogo
+
+  def apply(a: Int): Int = gogo
+
   def main(args: Array[String]): Unit = {
     val parser = new ByteCodeParser
-    parser.parse[ABC](closure9.getClass)
+
+
+    val result = parser.parse[java.lang.Integer](new Map2().getClass)
+    Console.println("\nResult of ByteCodeParser: ")
+    Console.println("===============================================")
+    Console.println(ByteCodeParser.treeString(result))
   }
 }

@@ -1,20 +1,20 @@
 package spark.closure_poc
-import java.io.{PrintStream}
 
+import java.io.{PrintStream}
+import scala.collection.immutable.Stack
+import scala.collection.mutable
 import scala.reflect.ClassTag
+import scala.reflect.classTag
 
 import org.objectweb.asm.{ClassReader, ClassVisitor, MethodVisitor, Type}
 import org.objectweb.asm.Opcodes._
 import org.objectweb.asm.Type._
 import org.objectweb.asm.util.{Printer, Textifier, TraceMethodVisitor}
-import scala.reflect._
 
 import org.objectweb.asm.tree.{AbstractInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
-import scala.collection.immutable.Stack
-import scala.collection.mutable
 // TODO: Support scala companion object constant reference...
 // TODO: Support GETFIELD, GETSTATIC, ISHL, LSHL, ISHR, LSHR, IUSHR, LUSHR, TABLESWITCH,
-// LOOKUPSWITCH
+// and LOOKUPSWITCH
 object ByteCodeParser {
   val UnsupportedOpcodes = Set(
     // InvokeDynamicInsnNode

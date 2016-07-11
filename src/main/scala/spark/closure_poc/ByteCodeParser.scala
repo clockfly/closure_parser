@@ -12,9 +12,9 @@ import scala.reflect._
 import org.objectweb.asm.tree.{AbstractInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
 import scala.collection.immutable.Stack
 import scala.collection.mutable
-// TODO: Optimize the Arimetic operations to make it simper...
 // TODO: Support scala companion object constant reference...
-// TODO: Support GETFIELD, GETSTATIC
+// TODO: Support GETFIELD, GETSTATIC, ISHL, LSHL, ISHR, LSHR, IUSHR, LUSHR, TABLESWITCH,
+// LOOKUPSWITCH
 object ByteCodeParser {
   val UnsupportedOpcodes = Set(
     // InvokeDynamicInsnNode
@@ -128,7 +128,7 @@ object ByteCodeParser {
     def put(index: Int, value: Node): Unit = {
       if (value.dataType != elementDataType) {
         throw new ByteCodeParserException(
-          s"value's type ${value.dataType} mismatch ArrayNode's type ${elementDataType}")
+          s"Cannot put a value with type different with ArrayNode's type ${elementDataType}")
       }
       data(index) = value
     }
@@ -172,7 +172,6 @@ object ByteCodeParser {
     }
   }
 
-  // DSL does optimization before creating a node like constant folding optimization
   object DSL {
     def plus(left: Node, right: Node): Node = {
       (left, right) match {
@@ -316,7 +315,6 @@ object ByteCodeParser {
   }
 
   class MethodTracer(method: MethodNode, trace: Boolean = true, out: PrintStream = System.out) {
-
     private val printer = new Textifier
     private val visitor = new TraceMethodVisitor(printer)
     private val text = printer.getText.asInstanceOf[java.util.List[AnyRef]]
@@ -407,8 +405,8 @@ class ByteCodeParser {
     }, 0)
 
     if (applyMethods.length == 0) {
-      throw new ByteCodeParserException(s"Cannot find an apply method in class ${closure.getName}" +
-        s"the expected argument type of apply is: ${classTag[T].runtimeClass}")
+      throw new ByteCodeParserException(s"Cannot find an apply method in closure " +
+        s"${closure.getName}. The expected argument type is: ${classTag[T].runtimeClass}")
     }
     // Pick the first one if there are multiple apply methods found
     analyze[T](closure, applyMethods.head)
@@ -772,7 +770,7 @@ class ByteCodeParser {
                     push(first)
                   case (op, _) =>
                     throw new UnsupportedOpcodeException(op, s"Stack's data type categories " +
-                      s"(${stackCategories}) don't match the Opcode's requirements: ")
+                      s"(${stackCategories}) don't match the opcode's requirements: ")
                 }
               case ARRAYLENGTH =>
                 val array = pop()
@@ -788,8 +786,8 @@ class ByteCodeParser {
                   case (Constant(index: Int), node@ ArrayNode(_, _, _)) =>
                     push(node.get(index))
                   case _ =>
-                    throw new UnsupportedOpcodeException(op.getOpcode, "Failed to save data to a " +
-                      "array because the array index is not a constant value")
+                    throw new UnsupportedOpcodeException(op.getOpcode, "Failed to save data to " +
+                      "an array because the array index is not a constant value")
                 }
               case IASTORE | LASTORE | FASTORE | DASTORE | AASTORE | BASTORE | CASTORE | SASTORE =>
                 val data = pop()
@@ -800,7 +798,7 @@ class ByteCodeParser {
                     arrayNode.put(index, data)
                   case _ =>
                     throw new UnsupportedOpcodeException(op.getOpcode, "Failed to read data from " +
-                      "a array because the array index is not a constant value")
+                      "an array because the array index is not a constant value")
                 }
               case DRETURN | FRETURN | IRETURN | LRETURN | ARETURN =>
                 result = Some(pop())

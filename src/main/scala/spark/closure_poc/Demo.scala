@@ -145,15 +145,16 @@ object Demo {
   val closure25 = (v: Int) => gogo
 
   val closure26 = (v: ABC) => {
-    val array = new Array[Double](4)
+    val array = new Array[Any](4)
     array(0) = (((v.a + 5) - 2) * 6) / 2.0 % 3 // +, -, *, /, %
     array(1) = Math.sqrt(array.length)
     array(2) = v.a.toLong  // cast
     array(3) = {
       // >, <, ==, !=, >=, <=
-      val flag = (((v.a > 0) & (v.a < 4) & (v != 2)) | ((v.a >= 5) & (v.a <= 7)) ^ v.a == 9)
+      val flag = (((v.a > 0) & (v.a < 4) & (v != 2)) | ((v.a >= 5) & (v.a <= 7)))
       if (flag) 1 else 0
     }
+    array
   }
 
   val closure27 = (v: ABC) => {
@@ -169,11 +170,16 @@ object Demo {
     (v.a <= 0)
   }
 
+
+  val closure29 = (v: ABC) => {
+    (v.a > 0) && (v.a < 4) && (v.a != 2)
+  }
+
   def apply(a: Int): Int = gogo
 
   def main(args: Array[String]): Unit = {
     val parser = new ByteCodeParser
-    val result = parser.parse[ABC](closure28.getClass)
+    val result = parser.parse[ABC](closure29.getClass)
     Console.println("\nResult of ByteCodeParser: ")
     Console.println("===============================================")
     Console.println(ByteCodeParser.treeString(result))

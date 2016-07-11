@@ -1,8 +1,8 @@
 package spark.closure_poc
 
-import java.io.{PrintStream}
+import java.io.PrintStream
+
 import scala.collection.immutable.Stack
-import scala.collection.mutable
 import scala.reflect.ClassTag
 import scala.reflect.classTag
 
@@ -10,13 +10,12 @@ import org.objectweb.asm.{ClassReader, ClassVisitor, MethodVisitor, Type}
 import org.objectweb.asm.Opcodes._
 import org.objectweb.asm.Type._
 import org.objectweb.asm.util.{Printer, Textifier, TraceMethodVisitor}
-
 import org.objectweb.asm.tree.{AbstractInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
 // TODO: Support scala companion object constant reference...
 // TODO: Support GETFIELD, GETSTATIC, ISHL, LSHL, ISHR, LSHR, IUSHR, LUSHR, TABLESWITCH,
 // and LOOKUPSWITCH
 object ByteCodeParser {
-  val UnsupportedOpcodes = Set(
+  private val UnsupportedOpcodes = Set(
     // InvokeDynamicInsnNode
     INVOKEDYNAMIC,
     // FieldInsnNode
@@ -28,9 +27,13 @@ object ByteCodeParser {
     // VarInsnNode, RET is not used by Java compile since JDK6.
     RET,
     // TypeInsnNode
-    NEW, INSTANCEOF,
+    NEW, INSTANCEOF, ANEWARRAY,
+    // IntInsnNode
+    NEWARRAY,
     // InsnNode
     ISHL, LSHL, ISHR, LSHR, IUSHR, LUSHR,
+    ARRAYLENGTH, IALOAD, LALOAD | FALOAD, DALOAD, AALOAD, BALOAD, CALOAD, SALOAD,
+    IASTORE, LASTORE, FASTORE, DASTORE, AASTORE, BASTORE, CASTORE, SASTORE,
     ATHROW,
     MONITORENTER, MONITOREXIT,
     // TableSwitchInsnNode
@@ -49,7 +52,7 @@ object ByteCodeParser {
   sealed trait Node {
     def children: List[Node]
     def dataType: Type
-    def copy: Node = this
+    def copy(): Node = this
   }
 
   trait BinaryNode extends Node {
@@ -111,55 +114,6 @@ object ByteCodeParser {
 
   case class Cast(node: Node, dataType: Type) extends UnaryNode
 
-  case class ArrayNode[T: ClassTag](
-      length: Node,
-      defaultValue: T,
-      var data: Map[Int, Node] = Map.empty[Int, Node])
-    extends Node {
-
-    // We need to override copy as ArrayNode is mutable.
-    override def copy(): Node = new ArrayNode[T](length, defaultValue, data)
-
-    if (length.dataType != Type.INT_TYPE) {
-      throw new ByteCodeParserException("ArrayNode must have a size of Int type")
-    }
-
-    def elementDataType: Type = Type.getType(classTag[T].runtimeClass)
-    override def dataType: Type = Type.getType(s"[${elementDataType.getDescriptor}")
-
-    override def children: List[Node] = data.toList.sortBy(_._1).map(_._2)
-
-    def get(index: Int): Node = data.getOrElse(index, Constant(defaultValue))
-    def put(index: Int, value: Node): Unit = { data += index -> value }
-  }
-
-  def treeString(node: Node): String = {
-    val builder = new StringBuilder
-
-    def simpleString: PartialFunction[Node, String] = {
-      case product: Node with Product  =>
-        val children = product.children.toSet[Any]
-        val args = product.productIterator.toList.filterNot {
-          case l: Iterable[_] => l.toSet.subsetOf(children)
-          case e if children.contains(e) => true
-          case dataType: Type => true
-          case map: mutable.Map[Int, Node] if product.isInstanceOf[ArrayNode[_]] => true
-          case _ => false
-        }
-        val argString = if (args.length > 0) args.mkString("(", ", ", ")") else ""
-        s"${product.getClass.getSimpleName}[${product.dataType}]$argString"
-    }
-
-    def buildTreeString(node: Node, depth: Int): Unit = {
-      (0 until depth).foreach(_ => builder.append("  "))
-      builder.append(simpleString(node))
-      builder.append("\n")
-      node.children.foreach(buildTreeString(_, depth + 1))
-    }
-    buildTreeString(node, 0)
-    builder.toString()
-  }
-
   /**
    * @param operator +, -, *, /, <, >, ==, !=, <=, >=,
    */
@@ -172,7 +126,34 @@ object ByteCodeParser {
     }
   }
 
-  object DSL {
+  def treeString(node: Node): String = {
+    val builder = new StringBuilder
+
+    def simpleString: PartialFunction[Node, String] = {
+      case product: Node with Product  =>
+        val children = product.children.toSet[Any]
+        val args = product.productIterator.toList.filterNot {
+          case l: Iterable[_] => l.toSet.subsetOf(children)
+          case e if children.contains(e) => true
+          case dataType: Type => true
+          case _ => false
+        }
+        val argString = if (args.length > 0) args.mkString("(", ", ", ")") else ""
+        s"${product.getClass.getSimpleName}[${product.dataType}]$argString"
+    }
+
+    def buildTreeString(node: Node, depth: Int): Unit = {
+      (0 until depth).foreach(_ => builder.append("  "))
+      builder.append(simpleString(node))
+      builder.append("\n")
+      node.children.foreach(buildTreeString(_, depth + 1))
+    }
+
+    buildTreeString(node, 0)
+    builder.toString()
+  }
+
+  private object DSL {
     def plus(left: Node, right: Node): Node = {
       (left, right) match {
         case (Constant(a: Int), Constant(b: Int)) => Constant(a + b)
@@ -314,7 +295,7 @@ object ByteCodeParser {
     }
   }
 
-  class MethodTracer(method: MethodNode, trace: Boolean = true, out: PrintStream = System.out) {
+  private class MethodTracer(method: MethodNode, trace: Boolean = true, out: PrintStream = System.out) {
     private val printer = new Textifier
     private val visitor = new TraceMethodVisitor(printer)
     private val text = printer.getText.asInstanceOf[java.util.List[AnyRef]]
@@ -431,6 +412,8 @@ class ByteCodeParser {
         inputLocalVars: Map[Int, Node]): Node = {
       var result: Option[Node] = None
       var index = startIndex
+      var localVars = inputLocalVars
+
       var stack = inputStack
 
       def pop(): Node = {
@@ -442,9 +425,6 @@ class ByteCodeParser {
       def push(node: Node): Unit = {
         stack = stack.push(node)
       }
-
-      var localVars = inputLocalVars
-      def copyLocalVars(): Map[Int, Node] = localVars.map(kv => (kv._1, kv._2.copy))
 
       while (index < instructions.size() && result.isEmpty) {
         val node = instructions.get(index)
@@ -459,11 +439,9 @@ class ByteCodeParser {
               case INVOKEVIRTUAL | INVOKESTATIC | INVOKESPECIAL | H_INVOKEINTERFACE =>
                 val className = Type.getObjectType(method.owner).getClassName
                 val methodName = method.name
-                val argumentTypes = Type.getArgumentTypes(method.desc)
+                val argumentLength = Type.getArgumentTypes(method.desc).length
                 val returnType = Type.getReturnType(method.desc)
-                val arguments = (0 until argumentTypes.length).toList.map {_ =>
-                  pop()
-                }.reverse
+                val arguments = (0 until argumentLength).toList.map(_ => pop()).reverse
                 val obj = if (method.getOpcode == INVOKESTATIC) {
                   null
                 } else {
@@ -478,22 +456,10 @@ class ByteCodeParser {
           case intInstruction: IntInsnNode =>
             intInstruction.getOpcode match {
               case BIPUSH | SIPUSH => push(Constant(intInstruction.operand))
-              case NEWARRAY =>
-                val count = pop()
-                val array = intInstruction.operand match {
-                  case T_BOOLEAN | T_BYTE | T_CHAR | T_SHORT | T_INT => ArrayNode[Int](count, 0)
-                  case T_FLOAT => ArrayNode[Float](count, 0F)
-                  case T_DOUBLE => ArrayNode[Double](count, 0D)
-                  case T_LONG => ArrayNode[Long](count, 0L)
-                }
-                push(array)
             }
 
           case typeInstruction: TypeInsnNode =>
-            val array = typeInstruction.getOpcode match {
-              case ANEWARRAY =>
-                val array = ArrayNode[AnyRef](pop(), null)
-                push(array)
+            typeInstruction.getOpcode match {
               case CHECKCAST => // skip
                 val node = pop()
                 push(cast(node, Type.getType(typeInstruction.desc)))
@@ -518,8 +484,9 @@ class ByteCodeParser {
                   case _ => comparator(left, right)
                 }
 
-                val trueStatement = invoke(instructions, instructions.indexOf(jump.label), stack, copyLocalVars())
-                val falseStatement = invoke(instructions, index + 1, stack, copyLocalVars())
+                val trueStatement = invoke(instructions, instructions.indexOf(jump.label), stack,
+                  localVars)
+                val falseStatement = invoke(instructions, index + 1, stack, localVars)
                 if (condition == Constant(true)) {
                   trueStatement
                 } else if (condition == Constant(false)) {
@@ -695,7 +662,6 @@ class ByteCodeParser {
                   case IFLE => jump.setOpcode(IF_ICMPLE)
                   case IFGE => jump.setOpcode(IF_ICMPGE)
                 }
-
               case POP | POP2 | DUP | DUP2 | DUP_X1 | DUP_X2 | DUP2_X1 | DUP2_X2 | SWAP =>
                 // Each data type has a category, which affects the behavior of stack operations.
                 // JVM Category 2 types: Long, Double.
@@ -787,34 +753,6 @@ class ByteCodeParser {
                   case (op, _) =>
                     throw new UnsupportedOpcodeException(op, s"Stack's data type categories " +
                       s"(${stackCategories}) don't match the opcode's requirements: ")
-                }
-              case ARRAYLENGTH =>
-                val array = pop()
-                array match  {
-                  case ArrayNode(length, _, _) => push(length)
-                  case x => throw new ByteCodeParserException("Expects an array from stack, but " +
-                    s"get ${x.getClass.getSimpleName}")
-                }
-              case IALOAD | LALOAD | FALOAD | DALOAD | AALOAD | BALOAD | CALOAD | SALOAD =>
-                val index = pop()
-                val array = pop()
-                (index, array) match {
-                  case (Constant(index: Int), node@ ArrayNode(_, _, _)) =>
-                    push(node.get(index))
-                  case _ =>
-                    throw new UnsupportedOpcodeException(op.getOpcode, "Failed to save data to " +
-                      "an array because the array index is not a constant value")
-                }
-              case IASTORE | LASTORE | FASTORE | DASTORE | AASTORE | BASTORE | CASTORE | SASTORE =>
-                val data = pop()
-                val index = pop()
-                val array = pop()
-                (index, array) match {
-                  case (Constant(index: Int), arrayNode@ ArrayNode(_, _, _)) =>
-                    arrayNode.put(index, data)
-                  case _ =>
-                    throw new UnsupportedOpcodeException(op.getOpcode, "Failed to read data from " +
-                      "an array because the array index is not a constant value")
                 }
               case DRETURN | FRETURN | IRETURN | LRETURN | ARETURN =>
                 result = Some(pop())

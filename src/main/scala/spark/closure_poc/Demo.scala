@@ -144,13 +144,36 @@ object Demo {
 
   val closure25 = (v: Int) => gogo
 
+  val closure26 = (v: ABC) => {
+    val array = new Array[Double](4)
+    array(0) = (((v.a + 5) - 2) * 6) / 2.0 % 3 // +, -, *, /, %
+    array(1) = Math.sqrt(array.length)
+    array(2) = v.a.toLong  // cast
+    array(3) = {
+      // >, <, ==, !=, >=, <=
+      val flag = (((v.a > 0) & (v.a < 4) & (v != 2)) | ((v.a >= 5) & (v.a <= 7)) ^ v.a == 9)
+      if (flag) 1 else 0
+    }
+  }
+
+  val closure27 = (v: ABC) => {
+    val array = new Array[Double](1)
+
+    val flag = (v.a > 0) && (v.a < 4) && (v.a != 2)
+    flag
+  }
+
+
+  val closure28 = (v: ABC) => {
+    val array = new Array[Double](1)
+    (v.a <= 0)
+  }
+
   def apply(a: Int): Int = gogo
 
   def main(args: Array[String]): Unit = {
     val parser = new ByteCodeParser
-
-
-    val result = parser.parse[java.lang.Integer](new Map2().getClass)
+    val result = parser.parse[ABC](closure28.getClass)
     Console.println("\nResult of ByteCodeParser: ")
     Console.println("===============================================")
     Console.println(ByteCodeParser.treeString(result))

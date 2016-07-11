@@ -49,6 +49,7 @@ object ByteCodeParser {
   sealed trait Node {
     def children: List[Node]
     def dataType: Type
+    def copy: Node = this
   }
 
   trait BinaryNode extends Node {
@@ -113,8 +114,11 @@ object ByteCodeParser {
   case class ArrayNode[T: ClassTag](
       length: Node,
       defaultValue: T,
-      data: mutable.Map[Int, Node] = mutable.Map.empty[Int, Node])
+      var data: Map[Int, Node] = Map.empty[Int, Node])
     extends Node {
+
+    // We need to override copy as ArrayNode is mutable.
+    override def copy(): Node = new ArrayNode[T](length, defaultValue, data)
 
     if (length.dataType != Type.INT_TYPE) {
       throw new ByteCodeParserException("ArrayNode must have a size of Int type")
@@ -123,15 +127,10 @@ object ByteCodeParser {
     def elementDataType: Type = Type.getType(classTag[T].runtimeClass)
     override def dataType: Type = Type.getType(s"[${elementDataType.getDescriptor}")
 
-    override def children: List[Node] = data.values.toList
+    override def children: List[Node] = data.toList.sortBy(_._1).map(_._2)
+
     def get(index: Int): Node = data.getOrElse(index, Constant(defaultValue))
-    def put(index: Int, value: Node): Unit = {
-      if (value.dataType != elementDataType) {
-        throw new ByteCodeParserException(
-          s"Cannot put a value with type different with ArrayNode's type ${elementDataType}")
-      }
-      data(index) = value
-    }
+    def put(index: Int, value: Node): Unit = { data += index -> value }
   }
 
   def treeString(node: Node): String = {
@@ -144,6 +143,7 @@ object ByteCodeParser {
           case l: Iterable[_] => l.toSet.subsetOf(children)
           case e if children.contains(e) => true
           case dataType: Type => true
+          case map: mutable.Map[Int, Node] if product.isInstanceOf[ArrayNode[_]] => true
           case _ => false
         }
         val argString = if (args.length > 0) args.mkString("(", ", ", ")") else ""
@@ -161,7 +161,7 @@ object ByteCodeParser {
   }
 
   /**
-   * @param operator +, -, *, /, <, >, ==, <=, >=,
+   * @param operator +, -, *, /, <, >, ==, !=, <=, >=,
    */
   case class Arithmetic(operator: String, left: Node, right: Node) extends BinaryNode {
     def dataType: Type = left.dataType
@@ -424,7 +424,11 @@ class ByteCodeParser {
     val tracer = new MethodTracer(applyMethod, trace = true)
 
     // invoke instructions starting from startIndex
-    def invoke(instructions: InsnList, startIndex: Int, inputStack: Stack[Node]): Node = {
+    def invoke(
+        instructions: InsnList,
+        startIndex: Int,
+        inputStack: Stack[Node],
+        inputLocalVars: Map[Int, Node]): Node = {
       var result: Option[Node] = None
       var index = startIndex
       var stack = inputStack
@@ -438,6 +442,9 @@ class ByteCodeParser {
       def push(node: Node): Unit = {
         stack = stack.push(node)
       }
+
+      var localVars = inputLocalVars
+      def copyLocalVars(): Map[Int, Node] = localVars.map(kv => (kv._1, kv._2.copy))
 
       while (index < instructions.size() && result.isEmpty) {
         val node = instructions.get(index)
@@ -502,19 +509,28 @@ class ByteCodeParser {
               val right = pop()
               val left = pop()
 
-              val condition = left match {
-                case a@Arithmetic("-", _, _) if right == Constant(0) => comparator(a.left, a.right)
-                case _ => comparator(left, right)
-              }
-
-              val trueStatement = invoke(instructions, instructions.indexOf(jump.label), stack)
-              val falseStatement = invoke(instructions, index + 1, stack)
-              if (condition == Constant(true)) {
-                trueStatement
-              } else if (condition == Constant(false)) {
-                falseStatement
+              if (jump.label == instructions.get(index + 1)) {
+                // Jump to immediate next instruction
+                invoke(instructions, instructions.indexOf(jump.label), stack, localVars)
               } else {
-                If(condition, trueStatement, falseStatement)
+                val condition = left match {
+                  case a@Arithmetic("-", _, _) if right == Constant(0) => comparator(a.left, a.right)
+                  case _ => comparator(left, right)
+                }
+
+                val trueStatement = invoke(instructions, instructions.indexOf(jump.label), stack, copyLocalVars())
+                val falseStatement = invoke(instructions, index + 1, stack, copyLocalVars())
+                if (condition == Constant(true)) {
+                  trueStatement
+                } else if (condition == Constant(false)) {
+                  falseStatement
+                } else {
+                  if (trueStatement == falseStatement) {
+                    trueStatement
+                  } else {
+                    If(condition, trueStatement, falseStatement)
+                  }
+                }
               }
             }
 
@@ -819,7 +835,7 @@ class ByteCodeParser {
       }
       result.get
     }
-    val result = invoke(applyMethod.instructions, 0, Stack.empty[Node])
+    val result = invoke(applyMethod.instructions, 0, Stack.empty[Node], localVars)
     // As JVM treats Boolean, Byte, Short as Integer in runtime, we need to do a cast to change
     // the return type back to expected type.
     cast(result, Type.getReturnType(applyMethod.desc))

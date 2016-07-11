@@ -11,10 +11,17 @@ import org.objectweb.asm.Opcodes._
 import org.objectweb.asm.Type._
 import org.objectweb.asm.util.{Printer, Textifier, TraceMethodVisitor}
 import org.objectweb.asm.tree.{AbstractInsnNode, FrameNode, IincInsnNode, InsnList, InsnNode, IntInsnNode, JumpInsnNode, LabelNode, LdcInsnNode, LineNumberNode, MethodInsnNode, MethodNode, TypeInsnNode, VarInsnNode}
-// TODO: Support scala companion object constant reference...
-// TODO: Support GETFIELD, GETSTATIC, ISHL, LSHL, ISHR, LSHR, IUSHR, LUSHR, TABLESWITCH,
-// and LOOKUPSWITCH
+
 object ByteCodeParser {
+
+  class ByteCodeParserException(message: String) extends Exception(message)
+
+  class UnsupportedOpcodeException(
+      opcode: Int,
+      message: String = "")
+    extends ByteCodeParserException(s"Unsupported opcode ${Printer.OPCODES(opcode)}, $message")
+
+  // TODO: Support GETFIELD, GETSTATIC for scala companion object constant reference...
   private val UnsupportedOpcodes = Set(
     // InvokeDynamicInsnNode
     INVOKEDYNAMIC,
@@ -41,13 +48,6 @@ object ByteCodeParser {
     // LookupSwitchInsnNode
     LOOKUPSWITCH
   )
-
-  class ByteCodeParserException(message: String) extends Exception(message)
-
-  class UnsupportedOpcodeException(
-      opcode: Int,
-      message: String = "")
-    extends ByteCodeParserException(s"Unsupported opcode ${Printer.OPCODES(opcode)}, $message")
 
   sealed trait Node {
     def children: List[Node]
@@ -87,10 +87,6 @@ object ByteCodeParser {
     override def toString: String = "This"
   }
 
-  case class Field(node: Node, fieldName: String, dataType: Type) extends NullaryNode {
-    override def toString: String = s"$node.$fieldName"
-  }
-
   // if (condition == true) left else right
   case class If(condition: Node, left: Node, right: Node) extends BinaryNode {
     def dataType: Type = left.dataType
@@ -114,9 +110,7 @@ object ByteCodeParser {
 
   case class Cast(node: Node, dataType: Type) extends UnaryNode
 
-  /**
-   * @param operator +, -, *, /, <, >, ==, !=, <=, >=,
-   */
+   // operator +, -, *, /, <, >, ==, !=, <=, >=,
   case class Arithmetic(operator: String, left: Node, right: Node) extends BinaryNode {
     def dataType: Type = left.dataType
     override def toString: String = {
@@ -295,17 +289,20 @@ object ByteCodeParser {
     }
   }
 
-  private class MethodTracer(method: MethodNode, trace: Boolean = true, out: PrintStream = System.out) {
+  private class MethodTracer(
+      method: MethodNode,
+      trace: Boolean = true,
+      out: PrintStream = System.out) {
     private val printer = new Textifier
     private val visitor = new TraceMethodVisitor(printer)
     private val text = printer.getText.asInstanceOf[java.util.List[AnyRef]]
 
     if (trace) {
-      out.println(s"\nByteCode of method ${method.name}:")
+      out.println(s"\nByteCode of closure method ${method.name}:")
       out.println("===============================================")
       method.accept(visitor)
       flush()
-      out.println(s"\nStart tracing method ${method.name}:")
+      out.println(s"\nStart tracing closure method ${method.name}:")
       out.println("===============================================")
     }
 
@@ -317,10 +314,11 @@ object ByteCodeParser {
           val instructionString = text.get(text.size() - 1).toString
           text.set(text.size() - 1, s"$stackString$instructionString")
         }
+        flush()
       }
     }
 
-    def flush(): Unit = {
+    private def flush(): Unit = {
       (0 until text.size()).foreach { line =>
         out.print(text.get(line).toString)
       }
@@ -350,7 +348,6 @@ class ByteCodeParser {
    */
   def parse[T: ClassTag](closure: Class[_], methodNamePattern: String): Node = {
     var applyMethods = List.empty[MethodNode]
-
     val reader = new ClassReader(closure.getName)
 
     reader.accept(new ClassVisitor(ASM5, null) {
@@ -432,7 +429,9 @@ class ByteCodeParser {
         if (ByteCodeParser.UnsupportedOpcodes.contains(opcode)) {
           throw new UnsupportedOpcodeException(opcode)
         }
+
         tracer.trace(stack, node)
+
         node match {
           case method: MethodInsnNode =>
             method.getOpcode match {
@@ -447,11 +446,7 @@ class ByteCodeParser {
                 } else {
                   pop()
                 }
-                if (obj.isInstanceOf[Argument] && arguments.length == 0) {
-                  push(Field(obj, methodName, returnType))
-                } else {
-                  push(FunctionCall(obj, className, methodName, arguments, returnType))
-                }
+                push(FunctionCall(obj, className, methodName, arguments, returnType))
             }
           case intInstruction: IntInsnNode =>
             intInstruction.getOpcode match {
@@ -480,7 +475,8 @@ class ByteCodeParser {
                 invoke(instructions, instructions.indexOf(jump.label), stack, localVars)
               } else {
                 val condition = left match {
-                  case a@Arithmetic("-", _, _) if right == Constant(0) => comparator(a.left, a.right)
+                  case a@Arithmetic("-", _, _) if right == Constant(0) =>
+                    comparator(a.left, a.right)
                   case _ => comparator(left, right)
                 }
 
@@ -642,7 +638,6 @@ class ByteCodeParser {
               case I2C => push(cast[String](pop))
               case I2S => push(cast[Short](pop))
               case LCMP | FCMPL | FCMPG | DCMPL | DCMPG =>
-
                 val jump = instructions.get(index + 1).getOpcode match {
                   case IFEQ | IFNE | IFLT | IFGT | IFLE | IFGE =>
                     instructions.get(index + 1).asInstanceOf[JumpInsnNode]
@@ -673,7 +668,7 @@ class ByteCodeParser {
                     case LONG_TYPE | DOUBLE_TYPE => 2
                     case _ => 1
                   }
-                }.slice(0, 4) // Stack operations at max use 4 stack slots.
+                }.slice(0, 4) // Stack operations like DUP2_X2 at max use 4 stack slots.
 
                 (op.getOpcode, stackCategories) match {
                   case (POP, 1::_) => pop()
@@ -766,8 +761,6 @@ class ByteCodeParser {
 
         index += 1
       }
-
-      tracer.flush()
       if (result.isEmpty) {
         throw new ByteCodeParserException("Failed to parse the closure for unknown reason")
       }

@@ -39,12 +39,12 @@ object ByteCodeParser {
     LOOKUPSWITCH
   )
 
-  class ByteCodeParserExecption(message: String) extends Exception(message)
+  class ByteCodeParserException(message: String) extends Exception(message)
 
   class UnsupportedOpcodeException(
       opcode: Int,
       message: String = "")
-    extends ByteCodeParserExecption(s"Unsupported opcode ${Printer.OPCODES(opcode)}, $message")
+    extends ByteCodeParserException(s"Unsupported opcode ${Printer.OPCODES(opcode)}, $message")
 
   sealed trait Node {
     def children: List[Node]
@@ -117,7 +117,7 @@ object ByteCodeParser {
     extends Node {
 
     if (length.dataType != Type.INT_TYPE) {
-      throw new ByteCodeParserExecption("ArrayNode must have a size of Int type")
+      throw new ByteCodeParserException("ArrayNode must have a size of Int type")
     }
 
     def elementDataType: Type = Type.getType(classTag[T].runtimeClass)
@@ -127,7 +127,7 @@ object ByteCodeParser {
     def get(index: Int): Node = data.getOrElse(index, Constant(defaultValue))
     def put(index: Int, value: Node): Unit = {
       if (value.dataType != elementDataType) {
-        throw new ByteCodeParserExecption(
+        throw new ByteCodeParserException(
           s"value's type ${value.dataType} mismatch ArrayNode's type ${elementDataType}")
       }
       data(index) = value
@@ -175,11 +175,6 @@ object ByteCodeParser {
   // DSL does optimization before creating a node like constant folding optimization
   object DSL {
     def plus(left: Node, right: Node): Node = {
-      // 1. check the type of left and right to make sure they match
-      // 2. if there are Constant
-      // 3. pick the left value and right value
-      // do the math   ()
-      // return value..
       (left, right) match {
         case (Constant(a: Int), Constant(b: Int)) => Constant(a + b)
         case (Constant(a: Float), Constant(b: Float)) => Constant(a + b)
@@ -267,7 +262,7 @@ object ByteCodeParser {
       }
     }
 
-    def lessThan(left: Node, right: Node): Node = {
+    def lt(left: Node, right: Node): Node = {
       (left, right) match {
         case (Constant(a: Int), Constant(b: Int)) => Constant(a < b)
         case (Constant(a: Float), Constant(b: Float)) => Constant(a < b)
@@ -277,9 +272,8 @@ object ByteCodeParser {
       }
     }
 
-    def greaterThan(left: Node, right: Node): Node = {
+    def gt(left: Node, right: Node): Node = {
       (left, right) match {
-
         case (Constant(a: Int), Constant(b: Int)) => Constant(a > b)
         case (Constant(a: Float), Constant(b: Float)) => Constant(a > b)
         case (Constant(a: Long), Constant(b: Long)) => Constant(a > b)
@@ -288,7 +282,7 @@ object ByteCodeParser {
       }
     }
 
-    def lessEqualThan(left: Node, right: Node): Node = {
+    def le(left: Node, right: Node): Node = {
       (left, right) match {
         case (Constant(a: Int), Constant(b: Int)) => Constant(a <= b)
         case (Constant(a: Float), Constant(b: Float)) => Constant(a <= b)
@@ -298,7 +292,7 @@ object ByteCodeParser {
       }
     }
 
-    def greaterEqualThan(left: Node, right: Node): Node = {
+    def ge(left: Node, right: Node): Node = {
       (left, right) match {
         case (Constant(a: Int), Constant(b: Int)) => Constant(a >= b)
         case (Constant(a: Float), Constant(b: Float)) => Constant(a >= b)
@@ -367,13 +361,13 @@ class ByteCodeParser {
   }
 
   /**
-   * Parses the closure an generate a Node tree.
+   * Parses the closure and generate a Node tree to represent the computation of the closure.
    *
    * @param closure input closure (single input argument, and single return value)
    * @param methodNamePattern regular expression pattern for the closure method
    * @tparam T the argument type of input closure
-   * @return root Node of the Node tree after parsing the closure.
-   * @throws ByteCodeParserExecption
+   * @return root Node of the Node tree.
+   * @throws ByteCodeParserException
    */
   def parse[T: ClassTag](closure: Class[_], methodNamePattern: String): Node = {
     var applyMethods = List.empty[MethodNode]
@@ -413,7 +407,7 @@ class ByteCodeParser {
     }, 0)
 
     if (applyMethods.length == 0) {
-      throw new ByteCodeParserExecption(s"Cannot find an apply method in class ${closure.getName}" +
+      throw new ByteCodeParserException(s"Cannot find an apply method in class ${closure.getName}" +
         s"the expected argument type of apply is: ${classTag[T].runtimeClass}")
     }
     // Pick the first one if there are multiple apply methods found
@@ -422,7 +416,7 @@ class ByteCodeParser {
 
   private def analyze[T: ClassTag](closure: Class[_], applyMethod: MethodNode): Node = {
     if(applyMethod.tryCatchBlocks.size() != 0) {
-      throw new ByteCodeParserExecption("try...catch... is not supported in ByteCodeParser")
+      throw new ByteCodeParserException("try...catch... is not supported in ByteCodeParser")
     }
 
     var localVars = Map.empty[Int, Node]
@@ -537,13 +531,13 @@ class ByteCodeParser {
               case IF_ICMPNE | IF_ACMPNE =>
                 result = Some(compareAndJump(compareNotEqual))
               case IF_ICMPLT =>
-                result = Some(compareAndJump(lessThan))
+                result = Some(compareAndJump(lt))
               case IF_ICMPGT =>
-                result = Some(compareAndJump(greaterThan))
+                result = Some(compareAndJump(gt))
               case IF_ICMPLE =>
-                result = Some(compareAndJump(lessEqualThan))
+                result = Some(compareAndJump(le))
               case IF_ICMPGE =>
-                result = Some(compareAndJump(greaterEqualThan))
+                result = Some(compareAndJump(ge))
               case IFNULL =>
                 push(Constant(null))
                 result = Some(compareAndJump(compareEqual))
@@ -558,16 +552,16 @@ class ByteCodeParser {
                 result = Some(compareAndJump(compareNotEqual))
               case IFLT =>
                 push(Constant(0))
-                result = Some(compareAndJump(lessThan))
+                result = Some(compareAndJump(lt))
               case IFGT =>
                 push(Constant(0))
-                result = Some(compareAndJump(greaterThan))
+                result = Some(compareAndJump(gt))
               case IFLE =>
                 push(Constant(0))
-                result = Some(compareAndJump(lessEqualThan))
+                result = Some(compareAndJump(le))
               case IFGE =>
                 push(Constant(0))
-                result = Some(compareAndJump(greaterEqualThan))
+                result = Some(compareAndJump(ge))
               case GOTO =>
                 index = instructions.indexOf(jump.label) - 1
             }
@@ -784,7 +778,7 @@ class ByteCodeParser {
                 val array = pop()
                 array match  {
                   case ArrayNode(length, _, _) => push(length)
-                  case x => throw new ByteCodeParserExecption("Expects an array from stack, but " +
+                  case x => throw new ByteCodeParserException("Expects an array from stack, but " +
                     s"get ${x.getClass.getSimpleName}")
                 }
               case IALOAD | LALOAD | FALOAD | DALOAD | AALOAD | BALOAD | CALOAD | SALOAD =>
@@ -823,7 +817,7 @@ class ByteCodeParser {
 
       tracer.flush()
       if (result.isEmpty) {
-        throw new ByteCodeParserExecption("Failed to parse the closure for unknown reason")
+        throw new ByteCodeParserException("Failed to parse the closure for unknown reason")
       }
       result.get
     }
